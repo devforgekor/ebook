@@ -1,0 +1,16 @@
+# systemd unit for TelegramBot (AI/REST/Notifier)
+[Unit]
+Description=TelegramBot Service (AI/REST/Notifier)
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/Users/minipark4u/project/agora
+ExecStart=/usr/local/bin/python3 apps/telegrambot/run_bot.py
+Restart=always
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/Users/minipark4u/project/agora/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Azure Functions local settings (contains secrets)
+local.settings.json
+
+# Build output
+dist/
+.build/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

@@ -1,0 +1,106 @@
+[
+  {
+    "id": "registry_2026_홍길동|1990-01-01",
+    "cohortId": "registry_2026",
+    "type": "registry-member",
+    "uploadBatchId": "seed_batch_2026_01",
+    "schoolYear": 2026,
+    "documentType": "safety",
+    "personKey": "홍길동|1990-01-01",
+    "name": "홍길동",
+    "birthdate": "1990-01-01",
+    "phoneNumber": "01033334444",
+    "changeType": "active",
+    "employmentStatus": "active",
+    "createdAt": "2026-04-11T09:05:00.000Z",
+    "updatedAt": "2026-04-11T09:05:00.000Z"
+  },
+  {
+    "id": "registry_2026_김영희|1992-02-02",
+    "cohortId": "registry_2026",
+    "type": "registry-member",
+    "uploadBatchId": "seed_batch_2026_01",
+    "schoolYear": 2026,
+    "documentType": "integrity",
+    "personKey": "김영희|1992-02-02",
+    "name": "김영희",
+    "birthdate": "1992-02-02",
+    "phoneNumber": "01055556666",
+    "changeType": "new",
+    "employmentStatus": "active",
+    "createdAt": "2026-04-11T09:05:00.000Z",
+    "updatedAt": "2026-04-11T09:05:00.000Z"
+  },
+  {
+    "id": "cohort_safety_2024-2026",
+    "type": "cohort",
+    "cohortId": "safety_2024-2026",
+    "documentType": "safety",
+    "active": true,
+    "title": "안전 1기",
+    "schoolYear": 2026,
+    "createdAt": "2026-04-11T09:00:00.000Z",
+    "updatedAt": "2026-04-11T09:00:00.000Z",
+    "updatedBy": "seed",
+    "auditTrail": [
+      {
+        "at": "2026-04-11T09:00:00.000Z",
+        "action": "COHORT_UPSERT",
+        "actor": "seed",
+        "details": {
+          "cohortId": "safety_2024-2026",
+          "documentType": "safety",
+          "active": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "cohort_integrity_2026",
+    "type": "cohort",
+    "cohortId": "integrity_2026",
+    "documentType": "integrity",
+    "active": true,
+    "title": "청렴 2026",
+    "schoolYear": 2026,
+    "createdAt": "2026-04-11T09:00:00.000Z",
+    "updatedAt": "2026-04-11T09:00:00.000Z",
+    "updatedBy": "seed",
+    "auditTrail": [
+      {
+        "at": "2026-04-11T09:00:00.000Z",
+        "action": "COHORT_UPSERT",
+        "actor": "seed",
+        "details": {
+          "cohortId": "integrity_2026",
+          "documentType": "integrity",
+          "active": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "cohort_mandatory_2026",
+    "type": "cohort",
+    "cohortId": "mandatory_2026",
+    "documentType": "mandatory",
+    "active": true,
+    "title": "의무 2026",
+    "schoolYear": 2026,
+    "createdAt": "2026-04-11T09:00:00.000Z",
+    "updatedAt": "2026-04-11T09:00:00.000Z",
+    "updatedBy": "seed",
+    "auditTrail": [
+      {
+        "at": "2026-04-11T09:00:00.000Z",
+        "action": "COHORT_UPSERT",
+        "actor": "seed",
+        "details": {
+          "cohortId": "mandatory_2026",
+          "documentType": "mandatory",
+          "active": true
+        }
+      }
+    ]
+  }
+]

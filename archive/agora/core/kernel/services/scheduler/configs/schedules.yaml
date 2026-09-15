@@ -1,0 +1,40 @@
+# AGORA Scheduler 설정 예시
+# 모든 주기 작업(systemd timer/service)을 한 곳에서 선언합니다.
+#
+# - name: 유닛 고유 이름(agora- 접두사 권장)
+# - description: 설명
+# - working_dir: 실행 디렉토리
+# - exec_start: 실행 명령(venv python -m ... 권장)
+# - environment_file: .env 경로
+# - env: 추가 환경변수
+# - on_calendar: systemd 캘린더식
+# - start_immediately: 동기화 직후 1회 실행 여부
+# - user/group: 실행 계정
+# - restart_sec: 재시작 지연(초)
+# - start_limit: 폭주 방지
+# - wants/after: 의존 유닛
+# - disabled: true면 비활성화
+
+timers:
+  - name: "agora-reporter-monthly"
+    description: "AGORA Monthly Email Report"
+    working_dir: "/home/azureuser/agora"
+    exec_start: "/home/azureuser/agora/.venv/bin/python -m apps.notifier.email_reporter"
+    environment_file: "/home/azureuser/agora/.env"
+    env:
+      REPORT_PERIOD: "monthly"
+    on_calendar: "monthly"
+    start_immediately: true
+    start_limit: { interval_sec: 60, burst: 5 }
+
+  - name: "agora-backup-daily"
+    description: "Nightly backup to S3"
+    working_dir: "/home/azureuser/agora"
+    exec_start: "/home/azureuser/agora/.venv/bin/python -m apps.ops.backup_s3"
+    environment_file: "/home/azureuser/agora/.env"
+    env:
+      BACKUP_LEVEL: "daily"
+    on_calendar: "02:30"
+    wants: ["network-online.target"]
+    after: ["network-online.target"]
+    restart_sec: 5

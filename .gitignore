@@ -1,0 +1,53 @@
+# user configs (templates committed as *.example.yaml)
+config/*.yaml
+!config/*.example.yaml
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# virtualenvs
+.venv/
+venv/
+*.egg-info/
+
+# ide
+.idea/
+.vscode/
+
+# environment & secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# server state
+state.yaml
+
+# build records (auto-generated)
+builds/*
+!builds/.gitkeep
+
+# large data
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# temp
+*.tmp
+*.log
+.DS_Store
+
+# git sub-repos (tracked as working tree only)
+.git/
+
+# dependencies
+node_modules/
+.vite/
+

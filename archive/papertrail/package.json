@@ -1,0 +1,12 @@
+{
+  "name": "papertrail",
+  "version": "1.0.0",
+  "description": "AI 기반 모듈형 개발 참고서",
+  "main": "cli/deploy.py",
+  "scripts": {
+    "start": "python cli/deploy.py"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,18 @@
+import Link from "next/link";
+import React from "react";
+
+export default function AdminNav(): JSX.Element {
+  return (
+    <nav style={{ width: 200, background: "#eee", padding: 20 }}>
+      <h3>관리자 메뉴</h3>
+      <ul>
+        <li><Link href="/admin/roster">명단 관리</Link></li>
+        <li><Link href="/admin/schedule">일정 관리</Link></li>
+        <li><Link href="/admin/submissions">제출 문서</Link></li>
+        <li><Link href="/admin/unknown">Unknown</Link></li>
+        <li><Link href="/admin/shadowindex">ShadowIndex</Link></li>
+        <li><Link href="/admin/archive">아카이브</Link></li>
+      </ul>
+    </nav>
+  );
+}

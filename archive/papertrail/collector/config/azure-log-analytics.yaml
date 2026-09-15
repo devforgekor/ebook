@@ -1,0 +1,41 @@
+# collector/config/azure-log-analytics.yaml
+# Azure Monitor Log Analytics 수집 설정
+
+# 로그 쿼리 정의
+queries:
+  - name: container_app_console
+    category: ContainerAppConsoleLogs
+    query: |
+      ContainerAppConsoleLogs
+      | where TimeGenerated > ago({{query_time}})
+      | project TimeGenerated, ContainerAppName, Revision, Log
+      | order by TimeGenerated desc
+    default_query_time: 1h
+
+  - name: deployment_operations
+    category: AzureActivity
+    query: |
+      AzureActivity
+      | where OperationNameValue endswith "DEPLOY"
+      | where TimeGenerated > ago(24h)
+      | project TimeGenerated, OperationName, Caller, ResourceGroup, StatusValue
+    default_query_time: 24h
+
+# 출력 설정
+output:
+  format: json          # json, csv, ndjson
+  directory: collected/
+  filename_pattern: "logs-{{timestamp}}.json"
+  retention_days: 7
+
+# 재시도 정책
+retry:
+  max_attempts: 3
+  initial_delay: 5      # 초
+  backoff_factor: 2
+
+# 알림 (선택사항)
+notifications:
+  slack_webhook: ""
+  teams_webhook: ""
+  email: ""

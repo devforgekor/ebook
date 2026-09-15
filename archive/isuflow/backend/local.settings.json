@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+
+    "START_TIME": "08:30",
+    "END_TIME": "17:30",
+    "OFF_SCHEDULE_JSON": "[]",
+
+    "STORAGE_ACCOUNT_NAME": "devstoreaccount1",
+    "STORAGE_ACCOUNT_KEY": "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUjHh0z......",
+
+    "DI_ENDPOINT": "",
+    "DI_KEY": ""
+  }
+}

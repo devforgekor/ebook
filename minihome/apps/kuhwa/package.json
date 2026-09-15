@@ -1,0 +1,12 @@
+{
+  "name": "kuhwa-schedule",
+  "version": "1.0.0",
+  "private": true,
+  "description": "한국구화학교 학사일정 안내 사이트 (Vercel 서버리스)",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "nodemailer": "^9.0.5"
+  }
+}

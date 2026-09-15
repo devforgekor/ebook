@@ -1,0 +1,39 @@
+name: Telegram_Bot_Deploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/telegrambot/**'
+      - '.github/workflows/deploy.yml'
+      - 'ecosystem.config.js'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Azure via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AZURE_PUB_IP }}
+          username: azureuser
+          key: ${{ secrets.AZURE_SSH_KEY }}
+          # [중요] GitHub Secrets를 서버 쉘 변수로 노출시킵니다.
+          envs: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GEMINI_KEY
+          script: |
+            cd ~/agora
+            git pull origin main
+            
+            # 의존성 업데이트
+            cd apps/telegrambot
+            ./.venv/bin/pip install -r requirements.txt
+            
+            # [핵심] PM2 재시작 시점에 변수를 주입하며 '--update-env'를 꼭 붙입니다.
+            
+            
+            
+
+            

@@ -1,0 +1,4 @@
+{
+  "schedule": "0 */15 8-18 * * *",
+  "scriptFile": "__init__.py"
+}

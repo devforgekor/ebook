@@ -1,0 +1,26 @@
+[Unit]
+Description={{ description }}
+{% if wants %}Wants={{ wants | join(" ") }}{% endif %}
+{% if after %}After={{ after | join(" ") }}{% endif %}
+
+[Service]
+User={{ user }}
+Group={{ group }}
+WorkingDirectory={{ working_dir }}
+EnvironmentFile=-{{ environment_file }}
+{% for k, v in env.items() -%}
+Environment={{ k }}={{ v }}
+{% endfor -%}
+ExecStart={{ exec_start }}
+Restart=on-failure
+RestartSec={{ restart_sec }}
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+{% if start_limit %}
+StartLimitIntervalSec={{ start_limit.interval_sec }}
+StartLimitBurst={{ start_limit.burst }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

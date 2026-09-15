@@ -1,0 +1,36 @@
+# === Common ===
+TELEGRAM_TOKEN=1234567890
+TELEGRAM_TEST_TOKEN=1234567890
+TELEGRAM_NOTICE_TOKEN=1234567890
+GEMINI_KEY=1234567890
+ADMIN_CHAT_ID=1234567890
+ONEDRIVE_CLIENT_ID=1234567890
+ONEDRIVE_SECRET=1234567890
+GGDRIVE_CLIENT_ID=1234567890
+GGDRIVE_SECRET=1234567890
+TENANT_ID=common
+
+# === TelegramBot ===
+LOG_DIR=/var/log/agora/telegrambot
+LOG_LEVEL=DEBUG
+DATA_DIR=./data/agora/telegrambot
+TEMP_DIR=./temp/agora/telegrambot
+BOT_NAME=mesids_bot
+TOTAL_QUOTA=1000
+
+# === Lean ===
+REDIS_URL=redis://localhost:6379
+LEAN_STREAM=lean:optimize
+LEAN_RESULT_STREAM=lean:result
+LEAN_GROUP=lean-workers
+LEAN_WORKER_COUNT=2
+LEAN_DLQ=lean:deadletter
+DEBUG=True
+
+# === Chronicle ===
+REDIRECT_URI=http://localhost:8080
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=mesids@kuhwa.sen.sc.kr
+SMTP_PASS=GO@pw2820#
+MAIL_TO=minipark4u@gmail.com

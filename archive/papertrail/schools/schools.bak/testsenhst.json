@@ -1,0 +1,21 @@
+{
+  "school_nice_code": "b100000123",
+  "school_korean_name": "테스트학교",
+  "school_name_token": "test",
+  "nice_code": "sen",
+  "school_level": "hs",
+  "deploy_num": "01",
+  "env_suffix": "test",
+  "region_code": "krc",
+  "location": "koreacentral",
+  "BASE_NAME": "testsenhst01",
+  "SAFE_BASE": "testsenhst01",
+  "RESOURCE_GROUP": "rg-testsenhst01",
+  "STORAGE_ACCOUNT": "sttestsenhst01",
+  "KEYVAULT": "kv-testsenhst01",
+  "CONTAINER_APP": "app-testsenhst01",
+  "FUNCTION_APP": "func-testsenhst01",
+  "ACR": "acrtestsenhst01",
+  "LOG_ANALYTICS": "law-testsenhst01",
+  "IDENTITY": "id-testsenhst01"
+}

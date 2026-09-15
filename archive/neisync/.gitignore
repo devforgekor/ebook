@@ -1,0 +1,149 @@
+# ============================================================
+# 1. OS generated files
+# ============================================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+.Spotlight-V100
+.Trashes
+
+# ============================================================
+# 2. Syncthing metadata (if you sync this folder with Syncthing)
+# ============================================================
+.sync-conflict-*
+.stfolder/
+.stignore
+.syncthing/
+
+# ============================================================
+# 3. IDE and editors
+# ============================================================
+# VS Code
+.vscode/
+# JetBrains (PyCharm, IntelliJ, etc.)
+.idea/
+*.iml
+*.iws
+*.ipr
+# Visual Studio
+.vs/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.aps
+*.opendb
+*.sdf
+*.suo
+# Jupyter Notebook
+.ipynb_checkpoints/
+# Vim/Emacs
+*.swp
+*.swo
+
+# ============================================================
+# 4. Python
+# ============================================================
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+# Virtual environments
+venv/
+VENV/
+env/
+ENV/
+.venv/
+.VENV/
+.env/
+.ENV/
+
+# ============================================================
+# 5. Security & environment variables
+# ============================================================
+.env
+*.env
+*.pem
+*.key
+*.pub
+.ENV
+*.ENV
+*.PEM
+*.KEY
+*.PUB
+
+# ============================================================
+# 6. Microsoft Office temporary files
+# ============================================================
+~$*.doc*
+~$*.xls*
+~$*.ppt*
+
+# ============================================================
+# 7. Data, logs, and temporary files (project-specific)
+# ============================================================
+logs/
+Logs/
+log/
+Log/
+trash/
+temp/
+cache/
+Docs/
+docs/
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+*.zip
+*.tar.gz
+*.7z
+*.rar
+
+# ============================================================
+# 8. Additional common patterns
+# ============================================================
+# Node.js
+node_modules/
+# Java
+*.class
+target/
+# C/C++
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+build/
+dist/
+
+# ============================================================
+# 9. 데이터 베이스 파일
+# ============================================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================================
+# 10. 로컬 개발 테스트 파일
+# ============================================================
+test_*.*
+*_test.*
+*_test_*.*
+data/
+# 나이스 인증키(삭제 금지)
+NEIS_KEYS_JSON.json

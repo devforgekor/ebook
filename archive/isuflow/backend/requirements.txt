@@ -1,0 +1,17 @@
+azure-functions
+azure-storage-blob
+azure-storage-queue
+azure-data-tables
+
+pillow
+pymupdf
+PyPDF2
+
+azure-core
+azure-identity
+azure-ai-formrecognizer   # (Document Intelligence SDK v3; name may vary by version)
+
+requests
+
+python-dateutil
+

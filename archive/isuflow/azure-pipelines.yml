@@ -1,0 +1,105 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  # Azure Function 설정
+  functionAppName: "isuflow-backend"
+  azureSubscription: "ISUFLOW-PROD-SUBSCRIPTION"
+  pythonVersion: "3.11"
+
+stages:
+  # -------------------------------------------------------------------
+  # ✅ Stage 1: CI – Build & Test
+  # -------------------------------------------------------------------
+  - stage: CI
+    displayName: "Build & Test"
+    jobs:
+      - job: Build
+        displayName: "Install deps / Run Tests"
+        pool:
+          vmImage: ubuntu-latest
+
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+            displayName: "Use Python $(pythonVersion)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: "Install Python dependencies"
+
+          # ✅ (옵션) Lint 실행
+          - script: |
+              pip install flake8
+              flake8 .
+            displayName: "Run flake8 lint"
+            continueOnError: true
+
+          # ✅ (옵션) Unit Tests
+          - script: |
+              if [ -d "tests" ]; then
+                pip install pytest
+                pytest -q
+              else
+                echo "No tests/ directory found. Skipping."
+              fi
+            displayName: "Run Unit Tests"
+
+          # ✅ 아티팩트 생성 (Function App ZIP)
+          - bash: |
+              mkdir -p build_output
+              cp -R * build_output/
+              cd build_output
+              zip -r isuflow-backend.zip .
+            displayName: "Create deployment artifact"
+
+          - publish: build_output/isuflow-backend.zip
+            artifact: drop
+            displayName: "Publish artifact"
+
+  # -------------------------------------------------------------------
+  # ✅ Stage 2: CD – Deploy to Azure Function App
+  # -------------------------------------------------------------------
+  - stage: CD
+    displayName: "Deploy to Azure Functions"
+    dependsOn: CI
+    condition: succeeded()
+
+    jobs:
+      - deployment: DeployToAzure
+        displayName: "Deploy using Azure CLI"
+        environment: Production
+
+        pool:
+          vmImage: ubuntu-latest
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ✅ 아티팩트 다운로드
+                - download: current
+                  artifact: drop
+
+                # ✅ Azure 로그인
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: "$(azureSubscription)"
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      echo "Deploying IsuFlow Backend..."
+
+                      # FunctionApp ZIP 배포
+                      az functionapp deployment source config-zip \
+                        --resource-group isuflow-rg \
+                        --name $(functionAppName) \
+                        --src $(Pipeline.Workspace)/drop/isuflow-backend.zip
+
+                      echo "✅ Deployment complete!"
+                  displayName: "Deploy to Azure Function App"
+                  

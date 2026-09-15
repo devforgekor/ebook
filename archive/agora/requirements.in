@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-telegram-bot[job-queue]
+httpx
+pydantic-settings
+python-json-logger
+aiofiles
+google-genai
+redis
+aioredis
+tiktoken
+pytest
+pytest-cov
+jinja2

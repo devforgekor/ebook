@@ -1,0 +1,76 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 수동 실행 허용
+
+jobs:
+  test-bash:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Run Bats tests
+        run: ./run-tests.sh
+
+  lint-bash:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint core scripts
+        run: |
+          set -e
+          for f in core/*.sh; do
+            echo "Linting $f"
+            shellcheck "$f" || true
+          done
+
+      - name: Lint infrastructure scripts
+        run: |
+          set -e
+          for f in infrastructure/azure/*.sh; do
+            echo "Linting $f"
+            shellcheck "$f" || true
+          done
+
+      - name: Lint cli scripts
+        run: |
+          set -e
+          for f in cli/*.sh; do
+            echo "Linting $f"
+            shellcheck "$f" || true
+          done
+
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 현재 프로젝트에 requirements.txt가 없으므로 생략
+
+      - name: Run Python syntax check
+        run: |
+          python -m py_compile cli/deploy.py cli/deploy-app.py || true

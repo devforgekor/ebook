@@ -1,0 +1,14 @@
+[Unit]
+Description=Gemini REST API Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/python3 -m uvicorn apps.gemini.main:app --host 0.0.0.0 --port 8000
+Restart=always
+User=www-data
+Group=www-data
+WorkingDirectory=/Users/minipark4u/project/agora
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+format:
+  template: "<path> | <English desc> | needs:<pkgs> | uses:<modules> | config:<path> | api()"
+  fields:
+    - name: path
+      required: true
+      note: relative to common-lib root, no .py extension
+    - name: description
+      required: true
+      note: English only, keyword-dense, describe WHAT not HOW
+    - name: needs
+      required: false
+      note: pip packages, comma separated
+    - name: uses
+      required: false
+      note: internal common-lib module paths, comma separated
+    - name: config
+      required: false
+      note: template path under config/
+    - name: api
+      required: true
+      note: func() or Class.method(), comma separated
+validation:
+  checks:
+    - pipe count >= 3
+    - path matches actual file location
+    - description is ASCII (no CJK)
+    - last field contains word( pattern
+    - optional fields use only needs:/uses:/config:
+  exit: 1 on any error
+examples:
+  minimal: |
+    core/utils | log to stderr, check az CLI, run shell commands | log_info(),log_warn(),log_error(),run_command()
+  with_needs: |
+    infrastructure/azure/containerapps | Container Apps: image update, revision wait, FQDN, env create | update_image(),wait_ready(),get_fqdn()
+  full: |

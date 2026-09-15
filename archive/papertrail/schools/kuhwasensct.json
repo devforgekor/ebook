@@ -1,0 +1,21 @@
+{
+  "school_nice_code": "b100000694",
+  "school_korean_name": "한국구화학교",
+  "school_name_token": "kuhwa",
+  "nice_code": "sen",
+  "school_level": "sc",
+  "deploy_num": "01",
+  "env_suffix": "test",
+  "region_code": "krc",
+  "location": "koreacentral",
+  "BASE_NAME": "kuhwasensct01",
+  "SAFE_BASE": "kuhwasensct01",
+  "RESOURCE_GROUP": "rg-kuhwasensct01",
+  "STORAGE_ACCOUNT": "stkuhwasensct01",
+  "KEYVAULT": "kv-kuhwasensct01",
+  "CONTAINER_APP": "app-kuhwasensct01",
+  "FUNCTION_APP": "func-kuhwasensct01",
+  "ACR": "acrkuhwasensct01",
+  "LOG_ANALYTICS": "law-kuhwasensct01",
+  "IDENTITY": "id-kuhwasensct01"
+}

@@ -1,0 +1,241 @@
+# feeds.yaml — RSS feed sources for news collector (v2.1 single pipeline)
+# Korean AI/Tech news feeds — EN/KO unified (no track separation)
+# Direct publisher RSS feeds (no Google News RSS limitations)
+# Updated: 2026-08-26 — added source_tiers
+feeds:
+  # ============================================================
+  # English AI / Tech News (직접 RSS - 무제한) - VERIFIED WORKING
+  # ============================================================
+  - name: "The Verge"
+    url: "https://www.theverge.com/rss/index.xml"
+    category: "tech"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "TechCrunch AI"
+    url: "https://techcrunch.com/category/artificial-intelligence/feed/"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "MIT Technology Review"
+    url: "https://www.technologyreview.com/feed/"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Ars Technica"
+    url: "https://arstechnica.com/feed/"
+    category: "tech"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "Hacker News"
+    url: "https://news.ycombinator.com/rss"
+    category: "tech"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Wired"
+    url: "https://www.wired.com/feed/rss"
+    category: "tech"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "IEEE Spectrum"
+    url: "https://spectrum.ieee.org/feeds/feed.rss"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "Bloomberg Tech"
+    url: "https://feeds.bloomberg.com/technology/news.rss"
+    category: "tech"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  # ============================================================
+  # AI Company / Research RSS (VERIFIED WORKING)
+  # ============================================================
+  - name: "OpenAI Blog"
+    url: "https://openai.com/blog/rss.xml"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Hugging Face Blog"
+    url: "https://huggingface.co/blog/feed.xml"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Google AI Blog"
+    url: "https://blog.google/technology/ai/rss/"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  # ============================================================
+  # Curated AI Newsletters (VERIFIED WORKING)
+  # ============================================================
+  - name: "Import AI"
+    url: "https://jack-clark.net/import-ai/rss"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  # ============================================================
+  # Research / ArXiv (VERIFIED WORKING)
+  # ============================================================
+  - name: "ArXiv CS.AI"
+    url: "https://rss.arxiv.org/rss/cs.AI"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "ArXiv CS.CL"
+    url: "https://rss.arxiv.org/rss/cs.CL"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "ArXiv CS.LG"
+    url: "https://rss.arxiv.org/rss/cs.LG"
+    category: "ai"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  # ============================================================
+  # Korean News RSS (VERIFIED WORKING 2026-08-26)
+  # ============================================================
+  - name: "매일경제"
+    url: "https://www.mk.co.kr/rss/30000001/"
+    category: "kor_economy"
+    language: "ko"
+    enabled: true
+    priority: "high"
+
+  - name: "한국경제"
+    url: "https://www.hankyung.com/feed/all-news"
+    category: "kor_economy"
+    language: "ko"
+    enabled: true
+    priority: "high"
+
+  - name: "연합뉴스 경제"
+    url: "https://www.yna.co.kr/rss/economy.xml"
+    category: "kor_economy"
+    language: "ko"
+    enabled: true
+    priority: "high"
+
+  - name: "GeekNews"
+    url: "https://feeds.feedburner.com/geeknews-feed"
+    category: "tech"
+    language: "ko"
+    enabled: true
+    priority: "high"
+
+  - name: "ITWorld Korea"
+    url: "https://www.itworld.co.kr/rss"
+    category: "tech"
+    language: "ko"
+    enabled: true
+    priority: "medium"
+
+  - name: "CNET Korea"
+    url: "https://www.cnet.co.kr/rss"
+    category: "tech"
+    language: "ko"
+    enabled: true
+    priority: "medium"
+
+  # ============================================================
+  # World Economy / Finance RSS (VERIFIED WORKING)
+  # ============================================================
+  - name: "Reuters Business"
+    url: "https://feeds.reuters.com/reuters/businessNews"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Bloomberg Markets"
+    url: "https://feeds.bloomberg.com/markets/news.rss"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "CNBC Economy"
+    url: "https://www.cnbc.com/id/20910258/device/rss/rss.html"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "MarketWatch"
+    url: "https://feeds.marketwatch.com/marketwatch/topstories/"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "WSJ Economy"
+    url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "Financial Times"
+    url: "https://www.ft.com/rss/home"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+  - name: "The Economist"
+    url: "https://www.economist.com/finance-and-economics/rss.xml"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "high"
+
+  - name: "Google News Business"
+    url: "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en"
+    category: "world_economy"
+    language: "en"
+    enabled: true
+    priority: "medium"
+
+# Settings
+settings:
+  max_articles_per_feed: 20
+  dedup_window_days: 7
+  min_relevance_score: 0.3
+  exclude_keywords:
+    - "광고"
+    - "ad"
+    - "sponsored"
+    - "promo code"
+    - "coupon"
+    - "프로모션"
+    - "할인"
+    - "discount"
+  refresh_interval_hours: 6

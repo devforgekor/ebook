@@ -1,0 +1,51 @@
+name: Deploy (What‑If)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '배포 환경 (test/prod)'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - prod
+      what_if:
+        description: 'What‑If 모드 실행'
+        required: true
+        default: 'true'
+        type: boolean
+
+jobs:
+  deploy-what-if:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        if: ${{ github.event.inputs.what_if == 'false' }}
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Run deploy script (what‑if)
+        env:
+          DEPLOY_WHAT_IF: ${{ github.event.inputs.what_if && '1' || '0' }}
+          NON_INTERACTIVE: '1'
+        run: |
+          cd cli
+          python deploy.py --what-if=${{ github.event.inputs.what_if == 'true' && 'true' || 'false' }} --non-interactive || echo "What‑If 실행 완료"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs
+          path: logs/

@@ -1,0 +1,10 @@
+{
+  "name": "schooldocs-workspace",
+  "private": true,
+  "scripts": {
+    "host:start": "npm --prefix apps/records-api run host:start",
+    "host:start:7072": "npm --prefix apps/records-api run host:start:7072",
+    "reset:local": "npm --prefix apps/records-api run reset:local",
+    "seed:local": "npm --prefix apps/records-api run seed:local"
+  }
+}

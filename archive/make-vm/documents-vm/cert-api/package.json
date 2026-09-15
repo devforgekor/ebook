@@ -1,0 +1,13 @@
+{
+  "name": "cert-api",
+  "version": "1.0.0",
+  "main": "src/functions/submit.js",
+  "dependencies": {
+    "@azure/cosmos": "^4.0.0",
+    "@azure/storage-blob": "^12.0.0",
+    "@azure/identity": "^4.0.0",
+    "pdf2pic": "^3.0.0",
+    "sharp": "^0.33.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}

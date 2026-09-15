@@ -1,0 +1,4 @@
+# NEISync config.yaml 예시
+neis_api_key: 여기에_발급받은_키_입력
+db_path: data/neisync.db
+debug: false

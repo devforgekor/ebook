@@ -1,0 +1,23 @@
+[
+  {
+    "id": "superadmin@example.com",
+    "email": "superadmin@example.com",
+    "type": "super",
+    "name": "총관리자",
+    "createdAt": "2026-04-11T09:00:00.000Z",
+    "updatedAt": "2026-04-11T09:00:00.000Z",
+    "updatedBy": "seed"
+  },
+  {
+    "id": "subsafe@example.com",
+    "email": "subsafe@example.com",
+    "type": "sub",
+    "name": "안전부관리자",
+    "allowedDocumentTypes": [
+      "safety"
+    ],
+    "createdAt": "2026-04-11T09:00:00.000Z",
+    "updatedAt": "2026-04-11T09:00:00.000Z",
+    "updatedBy": "seed"
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "name": "js-utils",
+  "version": "1.0.0",
+  "description": "Shared Node.js utilities harvested from kuhwa & related projects (paginated fetch, merge-by-key, static-first fallback, mail notifier, query param validation)",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.0"
+  }
+}

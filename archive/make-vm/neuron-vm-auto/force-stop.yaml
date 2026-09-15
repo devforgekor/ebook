@@ -1,0 +1,28 @@
+name: Force Stop VM
+on:
+  schedule:
+    - cron: '40 1 * * *'
+  workflow_dispatch:
+env:
+  TZ: Asia/Seoul
+jobs:
+  force-stop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Force stop
+        run: |
+          RUNNING_VMS=$(az vm list --resource-group Neuron_group --query "[?powerState=='VM running'].name" -o tsv)
+          for VM in $RUNNING_VMS; do
+            az vm deallocate --resource-group Neuron_group --name $VM --force
+          done
+      - name: Cleanup disks
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          ORPHAN_DISKS=$(az disk list --resource-group Neuron_group --query "[?tags.Expires<'$TODAY'].id" -o tsv)
+          for DISK in $ORPHAN_DISKS; do
+            az disk delete --ids $DISK --yes --no-wait
+          done
+          

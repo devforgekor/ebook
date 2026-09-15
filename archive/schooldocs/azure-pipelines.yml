@@ -1,0 +1,122 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - apps/**
+      - azure-pipelines.yml
+
+parameters:
+  - name: azureServiceConnection
+    type: string
+    default: 'MyAzureProdConnection'
+  - name: location
+    type: string
+    default: 'koreacentral'
+  - name: schoolNameToken
+    type: string
+    default: 'kuhwa'
+  - name: niceCode
+    type: string
+    default: 'sen'
+  - name: schoolLevel
+    type: string
+    default: 'sc'
+    values: [ 'kg', 'es', 'ms', 'hs', 'sc' ]
+  - name: envShort
+    type: string
+    default: 'p'
+    values: [ 't', 'p' ]
+  - name: deployNum
+    type: string
+    default: '01'
+  - name: regionCode
+    type: string
+    default: 'krc'
+  - name: configureRuntimeSecrets
+    type: boolean
+    default: true
+  - name: enableIpRestriction
+    type: boolean
+    default: false
+
+variables:
+  baseName: ${{ format('{0}{1}{2}{3}{4}', parameters.schoolNameToken, parameters.niceCode, parameters.schoolLevel, parameters.envShort, parameters.deployNum) }}
+  rgName: rg-${{ variables.baseName }}
+  appName: app-${{ variables.baseName }}
+  acrName: acr${{ variables.baseName }}
+  functionAppName: func-${{ variables.baseName }}
+  imageRepository: 'records-api'
+  imageTag: '$(Build.BuildId)'
+
+stages:
+  - stage: App
+    displayName: Build and Deploy App Image
+    jobs:
+      - job: BuildAndDeploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            displayName: Build image and push to ACR
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              inlineScript: |
+                az acr build \
+                  --registry $(acrName) \
+                  --image $(imageRepository):$(imageTag) \
+                  --file apps/records-api/Dockerfile \
+                  apps/records-api
+
+          - task: AzureCLI@2
+            displayName: Update Container App image
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              inlineScript: |
+                az containerapp update \
+                  --name $(appName) \
+                  --resource-group $(rgName) \
+                  --image $(acrName).azurecr.io/$(imageRepository):$(imageTag)
+
+          - task: AzureCLI@2
+            displayName: Wait for revision ready
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              inlineScript: |
+                attempt=1
+                max_attempts=10
+                while [ "$attempt" -le "$max_attempts" ]; do
+                  status=$(az containerapp revision list \
+                    --name $(appName) \
+                    --resource-group $(rgName) \
+                    --query "sort_by([*], &properties.createdTime)[-1].properties.provisioningState" \
+                    -o tsv 2>/dev/null || echo "Unknown")
+                  if [ "$status" = "Provisioned" ]; then
+                    echo "Container App revision is provisioned."
+                    exit 0
+                  fi
+                  echo "State: $status (attempt $attempt/$max_attempts)"
+                  sleep 60
+                  attempt=$((attempt + 1))
+                done
+                echo "Timed out."
+                exit 1
+
+          - task: AzureCLI@2
+            displayName: Deploy Functions code
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              inlineScript: |
+                cd functions
+                zip -r ../functions.zip . -q
+                cd ..
+                az functionapp deployment source config-zip \
+                  --resource-group $(rgName) \
+                  --name $(functionAppName) \
+                  --src functions.zip
+                  

@@ -1,0 +1,11 @@
+{
+  "tenant_id": "YOUR_TENANT_ID",
+  "client_id": "YOUR_APP_CLIENT_ID",
+  "client_secret": "YOUR_APP_CLIENT_SECRET",
+  "drive_id": "YOUR_ONEDRIVE_DRIVE_ID",
+  "remote_raw_dir": "chronicle",
+  "raw_dir": "/Users/minipark4u/app/chronicle/data/raw",
+  "retention_days": 7,
+  "delete_uploaded_only": true,
+  "state_file": "/Users/minipark4u/app/chronicle/data/state/onedrive_raw_state.json"
+}

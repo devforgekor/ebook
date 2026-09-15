@@ -1,0 +1,62 @@
+#!/bin/bash
+# azure-qwen — Golden Image 배포 alias (SP1, 2026.09.0, FX2ms_v2 Gen2)
+# Usage: azure-qwen [--name <vm-name>] [--dry-run] [extra az vm create args]
+set -euo pipefail
+source ~/.config/devforge/secrets.env 2>/dev/null || true
+if ! az account show --query id -o tsv 2>/dev/null | /usr/bin/grep -q "a942e898"; then
+  az login --service-principal -u "$AZURE_SP_ACCOUNT1_CLIENT_ID" -p "$AZURE_SP_ACCOUNT1_CLIENT_SECRET" --tenant "$AZURE_SP_ACCOUNT1_TENANT_ID" >/dev/null 2>&1 || true
+  az account set --subscription a942e898-e1ee-47f4-b9b3-d9475672ff4e 2>/dev/null || true
+fi
+RG="rg-devforge-prod-cin"
+LOCATION="centralindia"
+GALLERY="gallery_devforge_prod_cin"
+IMAGE_DEF="llm-qwen-27b-golden"
+VM_SIZE="Standard_FX2ms_v2"
+VERSION="2026.09.0"
+if command -v podman >/dev/null 2>&1; then
+  DB_VER=$(podman exec postgres psql -U devforge -d devforge_app -t -A -c "SELECT version FROM golden_image_versions WHERE status='active' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | /usr/bin/tr -d ' ' | /usr/bin/tr -d '\n' || true)
+  [ -n "$DB_VER" ] && VERSION="$DB_VER"
+fi
+if ! az sig image-version show --resource-group "$RG" --gallery-name "$GALLERY" --gallery-image-definition "$IMAGE_DEF" --gallery-image-version "$VERSION" >/dev/null 2>&1; then
+  LATEST=$(az sig image-version list --resource-group "$RG" --gallery-name "$GALLERY" --gallery-image-definition "$IMAGE_DEF" --query "sort_by(@, &name)[-1].name" -o tsv 2>/dev/null || echo "")
+  [ -n "$LATEST" ] && VERSION="$LATEST"
+fi
+SUB=$(az account show --query id -o tsv 2>/dev/null)
+IMAGE="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Compute/galleries/$GALLERY/images/$IMAGE_DEF/versions/$VERSION"
+VM_NAME="llm-qwen-27b-$(date +%s)"
+DRY_RUN=false
+EXTRA=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name) VM_NAME="$2"; shift 2;;
+    --dry-run) DRY_RUN=true; shift;;
+    *) EXTRA+=("$1"); shift;;
+  esac
+done
+echo "=== azure-qwen deploy ==="
+echo "Gallery: $GALLERY/$IMAGE_DEF:$VERSION"
+echo "VM: $VM_NAME ($VM_SIZE, $LOCATION zone2, Spot Delete, Standard security for FX Gen2)"
+echo "Image: $IMAGE"
+if $DRY_RUN; then
+  echo "[dry-run] az vm create --resource-group $RG --name $VM_NAME --location $LOCATION --zone 2 --image $IMAGE --size $VM_SIZE --admin-username azureuser --ssh-key-values ~/.ssh/id_rsa.pub --priority Spot --eviction-policy Delete --os-disk-delete-option Delete --public-ip-sku Standard --security-type Standard ${EXTRA[*]}"
+  exit 0
+fi
+az vm create \
+  --resource-group "$RG" \
+  --name "$VM_NAME" \
+  --location "$LOCATION" \
+  --zone 2 \
+  --image "$IMAGE" \
+  --size "$VM_SIZE" \
+  --admin-username azureuser \
+  --ssh-key-values ~/.ssh/id_rsa.pub \
+  --priority Spot \
+  --eviction-policy Delete \
+  --os-disk-delete-option Delete \
+  --public-ip-sku Standard \
+  --security-type Standard \
+  "${EXTRA[@]}"
+IP=$(az vm show -d -g "$RG" -n "$VM_NAME" --query publicIps -o tsv 2>/dev/null || echo "")
+echo "VM $VM_NAME ready — IP: $IP — SSH: ssh azureuser@$IP"
+echo "Health: curl -H 'Authorization: Bearer \$LLAMA_API_KEY' https://$IP/health"
+echo "Delete: az vm delete -g $RG -n $VM_NAME --yes"

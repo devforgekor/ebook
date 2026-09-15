@@ -1,0 +1,103 @@
+1. feedback.py 임베딩 (ASCII 합계 문제)
+동의합니다. ASCII 합계는 사실상 무작위 유사도나 다름없습니다.
+
+권장 대안: Gemini embedding-001 모델 (비용 무료, 768차원) 또는 text-embedding-3-small.
+
+1인 개발자 비용 부담 없음: Gemini Embedding API는 일일 무료 할당량이 충분합니다.
+
+구현 간소화: llm_client.py에 get_embedding(text) 함수를 추가하고, feedback.py에서 호출하도록 변경.
+
+우선순위: 즉시 반영 (MVP 수준에서도 임베딩 없이는 피드백 점수 의미 없음)
+
+2. InteractionLogs 누락 (SQLite 임시 저장)
+동의합니다. 설계 명세서에는 Table Storage에 저장하지만, 배치 이관 전까지 SQLite에 보관하는 것이 안전합니다.
+
+수정 제안:
+
+sql
+CREATE TABLE IF NOT EXISTS InteractionLogs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    turn_id TEXT,
+    role TEXT,   -- 'user', 'thought', 'assistant'
+    content TEXT,
+    feedback_score REAL,
+    error_type TEXT,
+    turn_interval_sec REAL,
+    created_at REAL
+);
+/chat 엔드포인트에서 로그를 이 테이블에 INSERT.
+
+새벽 배치에서 이 데이터를 Azure Table Storage로 이관하고, 일정 기간(예: 7일) 후 SQLite에서 삭제.
+
+우선순위: 즉시 반영 (피드백 및 분석의 근간)
+
+3. CoT-Gap 분석 (사고 과정 vs 답변 분리)
+매우 중요. 설계 명세서에서 핵심 원칙 중 하나입니다.
+
+구현 아이디어:
+
+LLM 프롬프트에 "당신의 사고 과정(Thought)을 먼저 작성하고, 그 후에 최종 답변(Answer)을 작성하세요." 라고 지시.
+
+응답 파싱 시 Thought:와 Answer: 구분자로 분리하여 저장.
+
+두 텍스트 간 누락된 정보(예: Thought에 있는 개념이 Answer에 없음)를 감지 → 해당 관계의 가중치 증가.
+
+간단한 구현: concept_mapper.py에 detect_cot_gap(thought, answer) 함수 추가.
+
+비용 영향: Gemini 2.5 Flash는 긴 출력도 무료이므로 문제 없음.
+
+* user가 빠져있는지 확인 user thought answer 3개로 구분
+
+3개국어 전처리 (한/영/중 외 문자 필터링)
+설계 명세서 원칙이지만, 실제로는 생각보다 중요도가 낮을 수 있습니다.
+
+이유: Gemini 모델이 이미 다국어를 잘 처리하며, 사고 과정에 다른 문자가 섞여도 개념 추출에 큰 문제 없음.
+
+5. session_finalizer.py (ConversationSegments 저장 로직)
+background_tasks로 처리하는 것은 OK, 실제 저장 로직이 빠진 것은 지적 맞음.
+
+추가해야 할 내용:
+
+해당 세그먼트의 모든 턴을 가져와서 (InteractionLogs에서) Gemini 요약 API로 Chain of Density(CoD) 요약 생성.
+
+요약 결과를 Table Storage ConversationSegments 테이블에 저장 (또는 SQLite에 임시 저장 후 배치 이관).
+
+6. batch_jobs.py 누락 통계 (GlobalTokenStats, TurnIntervalStats 등)
+분석 및 최적화를 위해 필요하지만, 초기 MVP에서는 생략 가능하다고 봅니다.
+
+이유: 통계가 없어도 챗봇은 정상 작동하며, 100명 이하 사용자에게는 즉각적인 튜닝이 필수적이지 않음.
+
+하지만 주말 배치의 TypoCorrectionMap 정리와 6개월 이상 pending_relations 삭제는 중요하므로, 구현해야 함.
+
+7. Negative Lookahead (조회/등록 로직 없음)
+동의합니다. 테이블만 있고 실제 사용되지 않는 기능은 무의미.
+
+간단한 구현:
+
+concept_mapper.py에 check_negative_lookahead(concept_text, context) 함수 추가.
+
+/chat에서 개념 매핑 전에 이 함수 호출 → 매칭되면 프롬프트에 context_hint 삽입.
+
+등록 로직: 주말 배치에서 "동일 텍스트에 대해 서로 다른 Concept 매핑 시도 + 부정 피드백 3회 이상" 기록 시 NegativeLookahead에 INSERT.
+
+8. 프롬프트 캐싱
+Gemini API의 cached_content 기능은 아직 일반 공개되지 않았거나 제한적입니다. - 추후 재검토
+
+9. concept_mapper.py에서 last_used 업데이트 시 confidence 덮어쓰기 위험
+정확한 지적.
+
+현재 코드는 UPDATE Concept SET last_used = ? 만 수행하고, confidence는 건드리지 않음. → 위험 없음?
+
+하지만 find_or_create_concept에서 INSERT OR IGNORE 후에도 confidence를 새로 입력된 값으로 업데이트하는 로직이 없어서, 이미 존재하는 개념의 confidence가 변하지 않음.
+
+개선:
+
+python
+# 기존 개념일 경우 confidence 업데이트 (예: 점진적 평균)
+conn.execute(
+    "UPDATE Concept SET confidence = (confidence * 0.9 + ? * 0.1), last_used = ? WHERE concept_id = ?",
+    (new_confidence, time.time(), concept_id)
+)
+또는 단순히 last_used만 업데이트 (confidence는 생성 시 고정). 설계에 따라 결정
+

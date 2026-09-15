@@ -1,0 +1,11 @@
+{
+  "tenant_id": "${TENANT_ID}",
+  "client_id": "${ONEDRIVE_CLIENT_ID}",
+  "client_secret": "${ONEDRIVE_SECRET}",
+  "drive_id": "<YOUR_ONEDRIVE_DRIVE_ID>",
+  "remote_dir": "chronicle/raw",
+  "raw_dir": "../../data/chronicle/raw",
+  "retention_days": 7,
+  "delete_uploaded_only": true,
+  "state_file": "../../data/chronicle/state/onedrive_raw_state.json"
+}

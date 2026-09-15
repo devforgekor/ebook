@@ -1,0 +1,10 @@
+{
+  "service_account_json": "/Users/minipark4u/app/chronicle/config/drive-service-account.json",
+  "incoming_folder_id": "YOUR_GOOGLE_DRIVE_INCOMING_FOLDER_ID",
+  "processed_folder_id": "YOUR_GOOGLE_DRIVE_PROCESSED_FOLDER_ID",
+  "upload_roots": [
+    "/Users/minipark4u/app/chronicle/data/daily"
+  ],
+  "download_dir": "/Users/minipark4u/app/chronicle/data/processed_from_drive",
+  "state_file": "/Users/minipark4u/app/chronicle/data/state/drive_sync_state.json"
+}

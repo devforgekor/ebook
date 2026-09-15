@@ -1,0 +1,11 @@
+__pycache__/
+exa_state.json
+web/node_modules/
+web/.next/
+web/.env.local
+
+# API state files
+exa_state.json
+tavily_state.json
+brave_state.json
+.vercel
