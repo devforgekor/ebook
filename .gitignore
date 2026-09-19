@@ -20,6 +20,10 @@ venv/
 .idea/
 .vscode/
 
+# local development
+.python-version
+.direnv/
+
 # environment & secrets
 .env
 .env.*
@@ -50,4 +54,15 @@ data/
 # dependencies
 node_modules/
 .vite/
+
+# font files (use CDN instead)
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# binary files
+*.zip
+*.tar.gz
+*.rar
 
