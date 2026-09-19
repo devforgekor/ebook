@@ -55,6 +55,11 @@ data/
 node_modules/
 .vite/
 
+# Next.js build
+.next/
+out/
+.turbo/
+
 # font files (use CDN instead)
 *.ttf
 *.otf
