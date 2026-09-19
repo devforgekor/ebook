@@ -71,3 +71,6 @@ out/
 *.tar.gz
 *.rar
 
+
+# kuhwa moved to its own repo (devforgekor/kuhwa)
+minihome/apps/kuhwa/
