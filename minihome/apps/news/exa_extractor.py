@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 # Status: production
 # Path: news.collector
-"""Content extractor — Exa primary, Tavily fallback, Brave fallback.
+"""Multi-Engine Search (MES) - Content extraction from multiple search providers
+
+NOTE: File will be renamed to multi_engine_search.py in future refactoring
+
+Engines:
+  - Exa Search (primary): Neural search + content extraction
+  - Tavily Extract: Fallback extraction API
+  - Brave Search: Alternative search + summarization
+
+Each engine supports 4-account rotation (MESIDS, MINIPARK4U, HYEONMINPARK4U, PLAYPARK4U)
+for rate limit distribution and quota isolation. Keys are auto-collected from Key Vault
+environment variables and assembled into rotation pools.
 
 Extraction chain: Exa → Tavily → Brave LLM Context
 """
@@ -10,7 +21,6 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -25,7 +35,7 @@ EXA_API_BASE = "https://api.exa.ai"
 TAVILY_API_BASE = "https://api.tavily.com"
 BRAVE_API_BASE = "https://api.search.brave.com"
 EXA_SECRET_KEY = "EXA_API_KEYS"
-TAVILY_SECRET_KEY = "TRAVILY_API_KEYS"
+TAVILY_SECRET_KEY = "TAVILY_API_KEYS"
 BRAVE_SECRET_KEY = "BRAVE_API_KEYS"
 
 
@@ -34,34 +44,53 @@ from collector.key_rotator_db import create_db_key_rotator
 
 
 def _load_keys_from_secrets(provider: str, secret_key: str) -> list[tuple[str, str]]:
-    """secrets.env에서 API 키 로드 (복호화 포함)"""
-    secrets_path = os.path.expanduser("~/.config/devforge/secrets.env")
-    if not os.path.exists(secrets_path):
-        return []
-
+    """환경변수에서 API 키 로드 (복호화 포함)"""
     keys = []
-    for line in Path(secrets_path).read_text().splitlines():
-        if line.startswith(f"{secret_key}="):
-            raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-            for item in raw.split(","):
-                item = item.strip()
-                if not item:
-                    continue
-                if ":" in item:
-                    name, cipher = item.split(":", 1)
-                    name = name.strip()
-                    cipher = cipher.strip()
-                    try:
-                        from lib.auth.api_key_cipher import decrypt_data
-                        plain = decrypt_data(cipher)
-                        if plain is None:
-                            plain = cipher
-                    except Exception:
-                        plain = cipher
-                    keys.append((name, plain))
-                else:
-                    keys.append((f"{provider}-{len(keys)}", item))
-            break
+
+    # 1. 환경변수 우선 조회 (통합 키)
+    env_val = os.environ.get(secret_key)
+
+    # 2. 통합 키가 없으면 개별 계정 키 자동 수집 (Key Vault rotation 전략)
+    if not env_val:
+        account_keys = []
+        provider_upper = provider.upper()
+        for account in ["MESIDS", "MINIPARK4U", "HYEONMINPARK4U", "PLAYPARK4U"]:
+            # TAVILY/YOUCOM의 MESIDS는 -GITHUB 접미사 사용
+            if provider_upper in ["TAVILY", "YOUCOM"] and account == "MESIDS":
+                key = os.environ.get(f"{provider_upper}_{account}_GITHUB_API_KEY")
+            else:
+                key = os.environ.get(f"{provider_upper}_{account}_API_KEY")
+
+            if key:
+                account_keys.append(f"{account}:{key}")
+
+        if account_keys:
+            env_val = ",".join(account_keys)
+
+    if not env_val:
+        return []
+    raw = env_val.strip().strip('"').strip("'")
+
+    # 키 파싱 (환경변수/파일 공통 로직)
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            name, cipher = item.split(":", 1)
+            name = name.strip()
+            cipher = cipher.strip()
+            try:
+                from lib.auth.api_key_cipher import decrypt_data
+                plain = decrypt_data(cipher)
+                if plain is None:
+                    plain = cipher
+            except Exception:
+                plain = cipher
+            keys.append((name, plain))
+        else:
+            keys.append((f"{provider}-{len(keys)}", item))
+
     return keys
 
 
@@ -69,7 +98,7 @@ class TavilyExtractor:
     """Tavily Extract API fallback."""
 
     def __init__(self):
-        self.keys = _load_keys_from_secrets("tavily", "TRAVILY_API_KEYS")
+        self.keys = _load_keys_from_secrets("tavily", "TAVILY_API_KEYS")
         self.rotator = create_db_key_rotator("tavily", self.keys) if self.keys else None
         self._stats = {"total": 0, "success": 0, "rate_limited": 0, "error": 0}
 

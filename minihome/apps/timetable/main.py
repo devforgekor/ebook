@@ -20,14 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from calendar_sync.router import router as calendar_router
 
 # Load secrets
+
 _SECRETS: dict[str, str] = {}
-_SF = os.path.expanduser("~/.config/devforge/secrets.env")
-if os.path.exists(_SF):
-    for _line in open(_SF).read().split("\n"):
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _SECRETS[_k.strip()] = _v.strip().strip('"').strip("'")
+
+for key in os.environ:
+    if key.startswith(("GOOGLE_", "CLIENT_", "CALENDAR_")):
+        _SECRETS[key] = os.environ[key]
 
 
 @asynccontextmanager

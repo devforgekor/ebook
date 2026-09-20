@@ -19,18 +19,11 @@ from utils import has_chinese
 
 
 def _load_secret(key_name: str) -> str:
-    secrets_path = os.path.expanduser("~/.config/devforge/secrets.env")
-    with open(secrets_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith(f"{key_name}="):
-                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-                return raw
-    return ""
+    return os.environ.get(key_name, "")
 
 
 def _get_openrouter_keys() -> List[str]:
-    """Load OpenRouter keys from secrets.env in explicit priority order.
+    """Load OpenRouter keys from environment in explicit priority order.
 
     Priority:
       1. MESIDS (primary)
@@ -38,22 +31,17 @@ def _get_openrouter_keys() -> List[str]:
       3. Others (e.g. GEMMA31B_FREE, tertiary)
     """
     groups: Dict[str, List[str]] = {}
-    secrets_path = os.path.expanduser("~/.config/devforge/secrets.env")
-    try:
-        with open(secrets_path) as f:
-            for line in f:
-                line = line.strip()
-                if "OPENROUTER" in line and "API_KEY" in line:
-                    raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if raw.startswith("sk-or-"):
-                        if "MESIDS" in line:
-                            groups.setdefault("mesids", []).append(raw)
-                        elif "MINIPARK4U" in line:
-                            groups.setdefault("minipark4u", []).append(raw)
-                        else:
-                            groups.setdefault("other", []).append(raw)
-    except FileNotFoundError:
-        pass
+
+    for env_key in os.environ:
+        if "OPENROUTER" in env_key and "API_KEY" in env_key:
+            raw = os.environ[env_key].strip().strip('"').strip("'")
+            if raw.startswith("sk-or-"):
+                if "MESIDS" in env_key:
+                    groups.setdefault("mesids", []).append(raw)
+                elif "MINIPARK4U" in env_key:
+                    groups.setdefault("minipark4u", []).append(raw)
+                else:
+                    groups.setdefault("other", []).append(raw)
 
     # Dedupe within each group, then assemble in priority order
     result = list(dict.fromkeys(groups.get("mesids", [])))

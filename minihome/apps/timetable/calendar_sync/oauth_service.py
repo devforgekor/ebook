@@ -42,25 +42,13 @@ def _validate_email(email: str) -> str:
     return email
 
 
-# Load secrets - support both local file and Vercel environment variables
+# Load secrets - environment variables only (Vercel / KV-injected)
 _SECRETS: dict[str, str] = {}
 
-# First check environment variables (Vercel)
 for key in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]:
     val = os.environ.get(key)
     if val:
         _SECRETS[key] = val
-
-# Then check local secrets file (if exists)
-_SF = os.path.expanduser("~/.config/devforge/secrets.env")
-if os.path.exists(_SF):
-    for _line in open(_SF).read().split("\n"):
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _k = _k.strip()
-            if _k not in _SECRETS:  # Environment variables take precedence
-                _SECRETS[_k] = _v.strip().strip('"').strip("'")
 
 
 # OAuth Configuration

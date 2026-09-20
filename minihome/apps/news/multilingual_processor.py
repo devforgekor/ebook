@@ -17,7 +17,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Dict, List, Optional
 
 # Add scripts/ to path for lib imports
@@ -71,34 +70,34 @@ NER_PATTERNS = {
 
 
 def _load_tavily_keys() -> list[tuple[str, str]]:
-    """Load Tavily API keys from secrets.env."""
-    secrets_path = os.path.expanduser("~/.config/devforge/secrets.env")
-    if not os.path.exists(secrets_path):
-        return []
-
+    """환경변수에서 Tavily API 키 로드."""
     keys = []
-    for line in Path(secrets_path).read_text().splitlines():
-        if line.startswith(f"{TAVILY_SECRET_KEY}="):
-            raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-            for item in raw.split(","):
-                item = item.strip()
-                if not item:
-                    continue
-                if ":" in item:
-                    name, cipher = item.split(":", 1)
-                    name = name.strip()
-                    cipher = cipher.strip()
-                    try:
-                        from lib.auth.api_key_cipher import decrypt_data
-                        plain = decrypt_data(cipher)
-                        if plain is None:
-                            plain = cipher
-                    except Exception:
-                        plain = cipher
-                    keys.append((name, plain))
-                else:
-                    keys.append((f"tavily-{len(keys)}", item))
-            break
+
+    env_val = os.environ.get(TAVILY_SECRET_KEY)
+    if not env_val:
+        return []
+    raw = env_val.strip().strip('"').strip("'")
+
+    # 키 파싱 (환경변수/파일 공통 로직)
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            name, cipher = item.split(":", 1)
+            name = name.strip()
+            cipher = cipher.strip()
+            try:
+                from lib.auth.api_key_cipher import decrypt_data
+                plain = decrypt_data(cipher)
+                if plain is None:
+                    plain = cipher
+            except Exception:
+                plain = cipher
+            keys.append((name, plain))
+        else:
+            keys.append((f"tavily-{len(keys)}", item))
+
     return keys
 
 

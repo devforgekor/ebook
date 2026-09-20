@@ -19,7 +19,6 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional
 
 # Add scripts/ to path
@@ -50,14 +49,11 @@ LLM_RETRY_BASE_DELAY = 2  # seconds
 
 def _load_secrets() -> Dict[str, str]:
     secrets = {}
-    sf = Path.home() / ".config/devforge/secrets.env"
-    if not sf.exists():
-        return secrets
-    for line in sf.read_text().split("\n"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, val = line.partition("=")
-            secrets[key.strip()] = val.strip().strip('"').strip("'")
+
+    for key in os.environ:
+        if key.startswith(("OPENROUTER_", "TELEGRAM_", "GEMINI_", "DEEPSEEK_")):
+            secrets[key] = os.environ[key]
+
     return secrets
 
 
