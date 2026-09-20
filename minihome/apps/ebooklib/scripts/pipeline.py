@@ -1452,8 +1452,10 @@ def run_revalidate(novel_id: Optional[str] = None) -> dict:
     import os as _os
     import requests as _requests
 
-    url = _os.getenv("VERCEL_REVALIDATE_URL", "").strip()
-    token = _os.getenv("VERCEL_REVALIDATE_TOKEN", "").strip()
+    url = (_os.getenv("VERCEL_REVALIDATE_URL") or "https://miniebook.vercel.app/api/revalidate").strip()
+    token = (
+        _os.getenv("VERCEL_REVALIDATE_TOKEN") or _os.getenv("VERCEL_REVALIDATE_TOKEN_KEY", "")
+    ).strip()
 
     if not url or not token:
         log.info("revalidate: VERCEL_REVALIDATE_URL/TOKEN 미설정, 스킵")
