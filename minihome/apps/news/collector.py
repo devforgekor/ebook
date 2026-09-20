@@ -38,6 +38,8 @@ from exa_extractor import ExaExtractor
 from multilingual_processor import MultilingualProcessor
 from translator import translate_article
 
+RSS_FETCH_TIMEOUT_SEC = 20  # per-feed network timeout (feedparser.parse(url) has none)
+
 def _is_excluded_title(title: str) -> bool:
     """Check if a title should be excluded before Exa extraction.
 
@@ -112,9 +114,14 @@ def _load_feeds() -> List[Dict[str, Any]]:
 def _fetch_rss(url: str, max_articles: int = 10) -> List[Dict[str, str]]:
     """Fetch RSS feed and extract headlines using feedparser."""
     import feedparser
+    import urllib.request
 
     try:
-        feed = feedparser.parse(url)
+        # fetch with an explicit timeout (feedparser.parse(url) has none and can block a feed)
+        req = urllib.request.Request(url, headers={"User-Agent": "DevForgeNews/1.0"})
+        with urllib.request.urlopen(req, timeout=RSS_FETCH_TIMEOUT_SEC) as resp:
+            raw = resp.read()
+        feed = feedparser.parse(raw)
         items = []
 
         for entry in feed.entries[:max_articles]:
