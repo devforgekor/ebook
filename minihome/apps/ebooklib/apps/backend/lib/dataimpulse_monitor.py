@@ -30,8 +30,20 @@ SIGNIN_URL = "https://app.dataimpulse.com/sign-in"
 _env_path = Path(__file__).parent.parent / ".env.local"
 
 
+def _parse_proxy_key(value: str):
+    """KV 결합 프록시 키 'user:pass@host:port' → (user, pass, host, port)."""
+    user = pw = host = port = ""
+    if "@" in value:
+        cred, hostport = value.rsplit("@", 1)
+        if ":" in cred:
+            user, pw = cred.split(":", 1)
+        if ":" in hostport:
+            host, port = hostport.split(":", 1)
+    return user, pw, host, port
+
+
 def _load_proxy_credentials() -> tuple[str, str, str, int]:
-    """DataImpulse 프록시 인증 정보 로드. env vars가 .env.local보다 우선."""
+    """DataImpulse 프록시 인증 정보 로드. 우선순위: 개별 env > KV 결합키 > .env.local."""
     # 1. .env.local에서 기본값 로드
     file_user = ""
     file_pass = ""
@@ -57,6 +69,18 @@ def _load_proxy_credentials() -> tuple[str, str, str, int]:
     passwd = os.getenv("DATAIMPULSE_PASS", file_pass)
     host = os.getenv("DATAIMPULSE_HOST", file_host or "gw.dataimpulse.com")
     port = int(os.getenv("DATAIMPULSE_PORT", str(file_port)))
+
+    # 3. KV 결합 키(DATAIMPULSE_PROXY_KEY) 파싱 — 개별 키 미설정 시 보충
+    combined = os.getenv("DATAIMPULSE_PROXY_KEY", "")
+    if combined:
+        cu, cp, ch, cpt = _parse_proxy_key(combined)
+        user = user or cu
+        passwd = passwd or cp
+        host = host or ch
+        try:
+            port = port or int(cpt)
+        except ValueError:
+            pass
 
     return user, passwd, host, port
 

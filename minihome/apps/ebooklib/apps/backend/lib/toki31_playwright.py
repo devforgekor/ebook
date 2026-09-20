@@ -84,16 +84,65 @@ _CHAPTER_COLD_MAX_BYTES = int(float(os.getenv('TOKI31_CHAPTER_COLD_MAX_MB', '1.5
 _CHAPTER_WARM_MAX_BYTES = int(float(os.getenv('TOKI31_CHAPTER_WARM_MAX_MB', '0.8')) * 1024 * 1024)
 
 
+def _parse_proxy_key(value: str):
+    """KV 결합 프록시 키 'user:pass@host:port' → (user, pass, host, port)."""
+    user = pw = host = port = ""
+    if "@" in value:
+        cred, hostport = value.rsplit("@", 1)
+        if ":" in cred:
+            user, pw = cred.split(":", 1)
+        if ":" in hostport:
+            host, port = hostport.split(":", 1)
+    return user, pw, host, port
+
+
 def _load_proxy_env():
-    """Load proxy credentials from .env.local."""
+    """프록시 자격증명 로드.
+
+    우선순위:
+    1. 개별 env var (MASKPROXY_USER 등, Key Vault 주입)
+    2. KV 결합 키 (MASKPROXY_PROXY_KEY / DATAIMPULSE_PROXY_KEY = user:pass@host:port) 파싱
+    3. .env.local 파일 (호환성 유지)
+    """
     env = {}
+
+    # 1. 개별 환경변수 우선 (Key Vault)
+    proxy_keys = [
+        'MASKPROXY_USER', 'MASKPROXY_PASS', 'MASKPROXY_HOST', 'MASKPROXY_PORT',
+        'DATAIMPULSE_USER', 'DATAIMPULSE_PASS', 'DATAIMPULSE_HOST', 'DATAIMPULSE_PORT'
+    ]
+    for key in proxy_keys:
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+
+    # 2. KV 결합 키 파싱 (개별 키 미설정 시)
+    for prefix in ('MASKPROXY', 'DATAIMPULSE'):
+        if env.get(f'{prefix}_USER'):
+            continue
+        combined = os.environ.get(f'{prefix}_PROXY_KEY', '')
+        if not combined and os.path.exists(ENV_LOCAL):
+            with open(ENV_LOCAL) as f:
+                for line in f:
+                    if line.strip().startswith(f'{prefix}_PROXY_KEY='):
+                        combined = line.split('=', 1)[1].strip().strip('"').strip("'")
+                        break
+        if combined:
+            u, p, h, pt = _parse_proxy_key(combined)
+            for suffix, val in (('USER', u), ('PASS', p), ('HOST', h), ('PORT', pt)):
+                if val:
+                    env.setdefault(f'{prefix}_{suffix}', val)
+
+    # 3. Fallback: .env.local 파일 (환경변수에 없는 것만)
     if os.path.exists(ENV_LOCAL):
         with open(ENV_LOCAL) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     k, v = line.split('=', 1)
-                    env[k.strip()] = v.strip()
+                    k = k.strip()
+                    if k not in env:  # 환경변수가 우선
+                        env[k] = v.strip()
     return env
 
 
