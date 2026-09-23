@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Status: production
+# Path: apps/backend/routers/pipeline.py, scripts/pipeline.py CLI, systemd pipeline loop
 """ebooklib 파이프라인 — 체인 방식 단계별 실행.
 
 각 단계는 독립적으로 실행되며, 이전 단계의 결과물(파일)을 입력으로 받음.
@@ -25,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
-sys.path.insert(0, '/opt/workspace/ebooklib/apps/backend')
+sys.path.insert(0, '/opt/workspace/minihome/apps/ebooklib/apps/backend')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,29 +46,22 @@ CHAPTER_DELAY_SEC = 300
 
 _SD_NOTIFY_READY = False
 
-# DataImpulse 대시보드 확인용 카운터 (10화마다 확인)
-_toki31_collect_count = 0
-DATAIMPULSE_CHECK_INTERVAL = 10  # N화마다 확인
+# DataImpulse API 주기 갱신 throttle (초). 일일 한도 SSOT(API 오늘값) 신선도 유지.
+_last_api_refresh = [0.0]
+API_REFRESH_SEC = 300
 
 
-def _check_dataimpulse_usage() -> None:
-    """10화마다 DataImpulse 사용량 확인 (프록시 기반)."""
-    global _toki31_collect_count
-    _toki31_collect_count += 1
-    if _toki31_collect_count < DATAIMPULSE_CHECK_INTERVAL:
+def _refresh_dataimpulse_periodic() -> None:
+    """5분 간격으로 DataImpulse API를 갱신 (idle 시에도 오늘값 신선도 유지)."""
+    now = time.time()
+    if now - _last_api_refresh[0] < API_REFRESH_SEC:
         return
-    _toki31_collect_count = 0
-
+    _last_api_refresh[0] = now
     try:
         from lib.dataimpulse_monitor import check_dataimpulse_sync
-        result = check_dataimpulse_sync()
-        if result.get("success"):
-            log.info(f"✅ DataImpulse 대시보드 확인 성공: {result.get('message')}")
-        else:
-            log.warning(f"⚠️ DataImpulse 대시보드 확인 실패: {result.get('message')}")
+        check_dataimpulse_sync()
     except Exception as e:
-        log.warning(f"DataImpulse 확인 실패: {e}")
-
+        log.debug(f"DataImpulse 주기 갱신 skip: {e}")
 
 def _sd_notify(state: str = "") -> None:
     """systemd watchdog 신호 전송 (Type=notify + WatchdogSec 대응).
@@ -100,23 +95,98 @@ def _sd_notify(state: str = "") -> None:
 def _write_status(data: dict) -> None:
     """진행 상황을 status.json에 기록 (loop/collect가 주기적으로 호출).
 
-    domain_health(도메인 헬스) 등 모니터링 필드는 새 데이터에 없으면
-    기존 값을 보존한다 — collect 상태 기록이 헬스 결과를 덮어쓰지 않도록.
+    동시 수집 대응:
+    - status.lock EX로 읽기-수정-쓰기 직렬화 (소스별 collect 병렬 실행)
+    - 소스별 진행 상황은 sources[source]에 병합 보존 — 한 소스의 완료 기록이
+      다른 소스의 진행 상태를 덮어쓰지 않도록
+    - 최상위 current/remaining은 호환용 aggregate (호출 시점 값 유지 + 소스 병합)
+    - domain_health 등 모니터링 필드는 새 데이터에 없으면 기존 값을 보존
     """
+    import fcntl
     try:
         data = dict(data)
-        if "domain_health" not in data:
+        lock_path = STATUS_FILE.with_suffix('.lock')
+        lockf = open(lock_path, 'w')
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_EX)
+            prev: dict = {}
+            if STATUS_FILE.exists():
+                try:
+                    loaded = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        prev = loaded
+                except Exception:
+                    prev = {}
+            if "domain_health" not in data and prev.get("domain_health"):
+                data["domain_health"] = prev["domain_health"]
+
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            src = data.get("source")
+            if not src and isinstance(data.get("current"), dict):
+                src = data["current"].get("source")
+            sources = dict(prev.get("sources") or {})
+            if src and data.get("phase") == "collect":
+                if data.get("current"):
+                    snap = {
+                        k: data.get(k)
+                        for k in ("phase", "current", "index", "total", "remaining", "processed", "dedup_skipped")
+                    }
+                    snap["source"] = src
+                    snap["updated_at"] = data["updated_at"]
+                    sources[src] = snap
+                else:
+                    # 해당 소스 collect 종료 → 자기 진행 항목만 제거
+                    sources.pop(src, None)
+            data["sources"] = sources
+
+            if data.get("phase") == "collect" and data.get("current") is None and sources:
+                # 이 소스는 끝났지만 다른 소스가 아직 진행 중 → aggregate 유지
+                latest = max(
+                    sources.values(),
+                    key=lambda s: s.get("updated_at") or "",
+                )
+                data["current"] = latest.get("current")
+                data["remaining"] = sum(int(s.get("remaining") or 0) for s in sources.values())
+                if data.get("total") is None:
+                    data["total"] = sum(int(s.get("total") or 0) for s in sources.values())
+
+            tmp = STATUS_FILE.with_suffix(f'.tmp.{os.getpid()}')
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, STATUS_FILE)
+        finally:
             try:
-                if STATUS_FILE.exists():
-                    prev = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
-                    if isinstance(prev, dict) and prev.get("domain_health"):
-                        data["domain_health"] = prev["domain_health"]
-            except Exception:
-                pass
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        STATUS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+            finally:
+                lockf.close()
     except Exception as e:
         log.warning(f"status.json 기록 실패: {e}")
+
+
+# DLQ/duplicates 공용 파일 락 — 동시 collect 프로세스가 같은 JSON을
+# 읽고 쓸 때 레코드 유실/깨짐 방지.
+_JSON_APPEND_LOCKS: dict = {}
+
+
+def _json_file_lock(path: Path):
+    import fcntl
+    key = str(path)
+    lockf = _JSON_APPEND_LOCKS.get(key)
+    if lockf is None:
+        lockf = open(path.with_suffix(path.suffix + '.lock'), 'w')
+        _JSON_APPEND_LOCKS[key] = lockf
+    fcntl.flock(lockf, fcntl.LOCK_EX)
+    return lockf
+
+
+def _json_file_unlock(path: Path) -> None:
+    import fcntl
+    lockf = _JSON_APPEND_LOCKS.get(str(path))
+    if lockf is not None:
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+        except Exception:
+            pass
 
 
 def _add_to_dlq(item: dict, error: str) -> None:
@@ -126,29 +196,37 @@ def _add_to_dlq(item: dict, error: str) -> None:
     failed.json에 보존한다.
     """
     try:
-        records = []
-        if DLQ_FILE.exists():
-            try:
-                with open(DLQ_FILE, encoding='utf-8') as f:
-                    records = json.load(f)
-                if not isinstance(records, list):
+        _json_file_lock(DLQ_FILE)
+        try:
+            records = []
+            if DLQ_FILE.exists():
+                try:
+                    with open(DLQ_FILE, encoding='utf-8') as f:
+                        records = json.load(f)
+                    if not isinstance(records, list):
+                        records = []
+                except (json.JSONDecodeError, OSError):
                     records = []
-            except (json.JSONDecodeError, OSError):
-                records = []
-        records.append({
-            "wr_id": item.get('wr_id'),
-            "novel_title": item.get('novel_title'),
-            "source": item.get('source', 'bookto31'),
-            "chapter": item.get('chapter'),
-            "error": error,
-            "attempts": item.get('attempts'),
-            "failed_at": datetime.now(timezone.utc).isoformat(),
-        })
-        # 최대 5000개 유지 (무한 증가 방지)
-        if len(records) > 5000:
-            records = records[-5000:]
-        with open(DLQ_FILE, 'w', encoding='utf-8') as f:
-            json.dump(records, f, ensure_ascii=False, indent=2)
+            records.append({
+                "wr_id": item.get('wr_id'),
+                "novel_title": item.get('novel_title'),
+                "source": item.get('source', 'bookto31'),
+                "chapter": item.get('chapter'),
+                "error": error,
+                "attempts": item.get('attempts'),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            # 최대 5000개 유지 (무한 증가 방지)
+            if len(records) > 5000:
+                records = records[-5000:]
+            tmp = DLQ_FILE.with_suffix(f'.tmp.{os.getpid()}')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, DLQ_FILE)
+        finally:
+            _json_file_unlock(DLQ_FILE)
     except Exception as e:
         log.warning(f"DLQ 기록 실패: {e}")
 
@@ -233,7 +311,7 @@ def _collect_bookto31(wr_id: int, item: dict) -> tuple[bool, str, str, Optional[
 
 
 def _collect_newtoki(wr_id: int, item: dict) -> tuple[bool, str, str, Optional[int]]:
-    """newtoki 수집기: Playwright + 프록시(MaskProxy 우선) + AES-GCM 복호화.
+    """newtoki 수집기: Playwright + DataImpulse 프록시 + AES-GCM 복호화.
 
     fetch_chapter_content_full는 내부에서 브라우저를 재사용하므로
     여기서 이벤트 루프를 직접 관리하지 않는다.
@@ -420,6 +498,20 @@ def _update_novel_status_from_discover(meta: dict, added: int, novel_title: str)
             log.info(f"  ✓ {novel_title}: 2개월 연속 신규 회차 0 → 완결로 판정")
 
 
+def _normalize_toki_title(raw: str) -> str:
+    """toki31 제목 정규화: '제목 - 작가 | 사이트' → '제목'.
+
+    사이트 og:title 형식이 '제목 - 작가 | 뉴토끼'이므로 site/author 접미사를 제거해
+    디렉터리/DB 제목을 깨끗하게 유지한다. (중복 디렉터리 방지)
+    """
+    t = (raw or "").strip()
+    if "|" in t:
+        t = t.split("|", 1)[0].strip()
+    if " - " in t:
+        t = t.rsplit(" - ", 1)[0].strip()
+    return t or (raw or "").strip()
+
+
 def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False) -> int:
     """toki31 소설의 전체 에피소드를 발견해 큐에 추가.
 
@@ -428,31 +520,26 @@ def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False)
     저장되지 않은 에피소드를 wr_id=episode_id, source=toki31, novel_ref=novel_id로 큐잉한다.
     """
     import asyncio as _asyncio
-    from lib.toki31_playwright import _load_proxy_env, _toki_base
+    from lib.toki31_playwright import _toki_base
     from lib.domain_router import auto_update_base
 
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
     def _fetch_episodes(only_title: bool = False):
-        env = _load_proxy_env()
-        # 프록시 우선순위: DataImpulse(한국 IP 지원) → MaskProxy(백업)
-        proxy_user = env.get("DATAIMPULSE_USER", "") or env.get("MASKPROXY_USER", "")
-        proxy_pass = env.get("DATAIMPULSE_PASS", "") or env.get("MASKPROXY_PASS", "")
-        proxy_host = env.get("DATAIMPULSE_HOST", "") or env.get("MASKPROXY_HOST", "")
-        proxy_port = env.get("DATAIMPULSE_PORT", "") or env.get("MASKPROXY_PORT", "")
-        if "dataimpulse" in proxy_host and "__cr." not in proxy_user:
-            proxy_user = proxy_user + "__cr.kr"
-        if not proxy_user or not proxy_pass:
+        from lib.toki31_playwright import playwright_proxy_config
+
+        # DataImpulse는 Chromium이 407 없이 인증을 안 보내 KR 타깃팅이 빠진다.
+        # playwright_proxy_config가 로컬 주입 프록시로 CONNECT 인증을 보장한다.
+        proxy_cfg = playwright_proxy_config()
+        if not proxy_cfg:
             log.warning("toki31 discover: 프록시 자격증명 없음 (.env.local)")
             return "", {}
-        proxy_url = "http://{}:{}".format(proxy_host, proxy_port)
 
         async def _run():
             from playwright.async_api import async_playwright
             async with async_playwright() as p:
-                b = await p.chromium.launch(headless=True,
-                    proxy={"server": proxy_url, "username": proxy_user, "password": proxy_pass})
+                b = await p.chromium.launch(headless=True, proxy=proxy_cfg)
                 c = await b.new_context(user_agent=UA, locale="ko-KR")
                 pg = await c.new_page()
                 # 불필요한 리소스 차단 (이미지/폰트/미디어/CSS → 트래픽 절약)
@@ -470,12 +557,13 @@ def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False)
                 except Exception:
                     pass
                 # og:title가 노벨 본제목을 직접 담고 있으므로 우선 사용
+                title = ""
                 try:
                     page_html = await pg.content()
                     import re as _re
                     og_m = _re.search(r'<meta property="og:title" content="([^"]+)"', page_html)
                     if og_m:
-                        title = og_m.group(1).strip()
+                        title = _normalize_toki_title(og_m.group(1))
                 except Exception:
                     pass
                 if not title:
@@ -487,6 +575,7 @@ def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False)
                     elif ' - ' in title:
                         parts = title.split(' - ')
                         title = parts[0].strip()
+                    title = _normalize_toki_title(title)
                 if only_title:
                     await b.close()
                     return title, {}
@@ -875,19 +964,28 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
 
 # === 2단계: COLLECT — 큐 소비 → JSON 저장 ===
 
-def run_collect(limit: int = 0, source_filter: str = "") -> dict:
+def run_collect(limit: int = 0, source_filter: str = "", blocking: bool = True) -> dict:
     """큐에서 wr_id를 하나씩 꺼내 source별 collector로 fetch → JSON 저장.
-    limit: 최대 처리할 챕터 수 (0=무제한)
+    limit: 최대 처리 챕터 수 (0=무제한)
     source_filter: 특정 source만 처리 (빈 문자열=전체)
+    blocking: False면 락 선점 시 즉시 skip (loop가 소스별 collect에 무한 대기 방지)
 
-    단일 writer 락: 두 프로세스(예: bookto31 loop + toki31 collect)가 동시에
-    queue를 처리하지 못하도록 전체 트랜잭션을 직렬화한다.
+    동시 수집: 소스 필터가 있으면 게이트 SH + 해당 소스 EX만 잡아 다른 소스와
+    병렬 실행을 허용한다. 전체 수집(source_filter 없음)은 게이트 EX로 모든
+    소스 수집과 상호 배제한다. 같은 소스끼리는 소스 EX로 직렬화된다.
     """
-    _acquire_collect_lock()
+    if not _acquire_collect_lock(source_filter, blocking=blocking):
+        remaining = 0
+        try:
+            remaining = len(_load_queue())
+        except Exception:
+            pass
+        log.debug(f"collect 락 선점 — source={source_filter or 'all'} skip")
+        return {"processed": 0, "errors": [], "remaining": remaining, "lock_busy": True}
     try:
         return _run_collect_locked(limit, source_filter)
     finally:
-        _release_collect_lock()
+        _release_collect_lock(source_filter)
 
 
 # 소설별 저장된 chapter 번호 캐시 (소스 무관 — 재다운로드 방지)
@@ -1046,25 +1144,31 @@ def _invalidate_saved_hash(novel_title: str) -> None:
 def _record_duplicate(novel_title: str, wr_id: int, chapter, dup_chapter, dup_file: str, reason: str) -> None:
     """중복 본문 이벤트를 duplicates.json에 기록 (치료 대상 파악용)."""
     try:
-        records = []
-        if DUPLICATES_FILE.exists():
-            try:
-                records = json.loads(DUPLICATES_FILE.read_text(encoding="utf-8"))
-                if not isinstance(records, list):
+        _json_file_lock(DUPLICATES_FILE)
+        try:
+            records = []
+            if DUPLICATES_FILE.exists():
+                try:
+                    records = json.loads(DUPLICATES_FILE.read_text(encoding="utf-8"))
+                    if not isinstance(records, list):
+                        records = []
+                except Exception:
                     records = []
-            except Exception:
-                records = []
-        records.append({
-            "novel_title": novel_title,
-            "wr_id": wr_id,
-            "chapter": chapter,
-            "dup_chapter": dup_chapter,
-            "dup_file": dup_file,
-            "reason": reason,
-            "detected_at": datetime.now(timezone.utc).isoformat(),
-        })
-        records = records[-2000:]
-        DUPLICATES_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            records.append({
+                "novel_title": novel_title,
+                "wr_id": wr_id,
+                "chapter": chapter,
+                "dup_chapter": dup_chapter,
+                "dup_file": dup_file,
+                "reason": reason,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            })
+            records = records[-2000:]
+            tmp = DUPLICATES_FILE.with_suffix(f'.tmp.{os.getpid()}')
+            tmp.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, DUPLICATES_FILE)
+        finally:
+            _json_file_unlock(DUPLICATES_FILE)
     except Exception:
         pass
 
@@ -1078,7 +1182,7 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     (loop는 소스별로 순회하므로 한 소스의 중단이 다른 소스를 막지 않음)
     """
     from lib.sources import get_traffic_limited
-    from lib.traffic_guard import reset_if_new_day, is_exceeded, add_bytes, summary
+    from lib.traffic_guard import reset_if_new_day, is_exceeded_calibrated, add_bytes, summary, summary_calibrated
     from lib.toki31_playwright import get_traffic_total_bytes, get_collector_state
 
     # 트래픽 가드 적용 여부 — 특정 소스 필터 시 그 소스가 유료 프록시인지에 따라.
@@ -1086,10 +1190,14 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     traffic_limited = (not source_filter) or get_traffic_limited(source_filter)
 
     reset_if_new_day()
-    if traffic_limited and is_exceeded():
-        s = summary()
+    # 한도 체크는 보정값 기준 (실제 과금 트래픽 근사)
+    # 로깅은 원시값 + 보정값 둘 다 표시
+    if traffic_limited and is_exceeded_calibrated():
+        s_raw = summary()
+        s_cal = summary_calibrated()
         log.warning(
-            f"  ⏸ 일일 트래픽 한도 초과 ({s['used_mb']}MB/{s['daily_limit_mb']}MB) "
+            f"  ⏸ 일일 트래픽 한도 초과 (보정: {s_cal['used_mb']}MB/{s_cal['daily_limit_mb']}MB, "
+            f"원시: {s_raw['used_mb']}MB, 계수: {s_cal['calibration_factor']}x) "
             f"— 자정까지 {source_filter or '유료 소스'} 중단 (queue {len(_load_queue())}건 보존)"
         )
         return {"processed": 0, "errors": [], "remaining": len(_load_queue()), "traffic_exceeded": True}
@@ -1127,6 +1235,7 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
         # 진행 상황 기록 (현재 처리 중인 회차)
         _write_status({
             "phase": "collect",
+            "source": source,
             "current": {
                 "wr_id": wr_id,
                 "novel_title": novel_title,
@@ -1223,6 +1332,18 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
 
         # 저장 (enrich/index 없이 순수 저장)
         chapter_num = item.get('chapter') or chapter_num
+
+        # toki31 성공 저장 시 10화마다 DataImpulse 대시보드 확인
+        # [WARNING] DataImpulse dashboard scraping disabled
+        # Reason: app.dataimpulse.com dashboard requires web login session (SPA),
+        # which is separate from proxy authentication (IP whitelist or user:pass).
+        # Proxy auth works for traffic routing, but dashboard access always redirects
+        # to sign-in page. No public usage API available. Re-enable only if:
+        #   - DataImpulse provides official usage API endpoint, OR
+        #   - Proxy response headers include usage stats (X-Proxy-Usage, etc.)
+        # Currently relying on traffic_guard local measurement only.
+        # (dead helper `_check_dataimpulse_usage` removed 2026-09-23; periodic refresh
+        #  uses `_refresh_dataimpulse_periodic` -> check_dataimpulse_sync instead)
         body_text = body[1] if isinstance(body, tuple) and len(body) == 2 else body
 
         # ── 중복 본문 방지 ──
@@ -1290,10 +1411,12 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
 
         # 일일 한도 도달 시 남은 회차는 다음 날 재개 (현재 회차는 위에서 처리/저장 완료)
         # 유료 프록시 소스에만 적용 (bookto31 등 무료 소스는 계속)
-        if traffic_limited and is_exceeded():
-            s = summary()
+        if traffic_limited and is_exceeded_calibrated():
+            s_raw = summary()
+            s_cal = summary_calibrated()
             log.warning(
-                f"  ⏸ 일일 트래픽 한도 도달 ({s['used_mb']}MB/{s['daily_limit_mb']}MB) "
+                f"  ⏸ 일일 트래픽 한도 도달 (보정: {s_cal['used_mb']}MB/{s_cal['daily_limit_mb']}MB, "
+                f"원시: {s_raw['used_mb']}MB, 계수: {s_cal['calibration_factor']}x) "
                 f"— 남은 {len(queue) - i - 1}건은 자정 이후 재개"
             )
             break
@@ -1302,13 +1425,19 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     # 동시에 실행된 discover가 추가한 항목을 보존하기 위해 디스크 최신 상태에 델타 적용.
     remaining_queue = [q for q in full_queue if q['wr_id'] not in removed_ids]
     _merge_into_queue(remove_ids=removed_ids)
-    s = summary()
+    s_raw = summary()
+    s_cal = summary_calibrated()
+    log.info(
+        f"  📊 트래픽 세션 요약: 보정 {s_cal['used_mb']}MB (원시 {s_raw['used_mb']}MB, "
+        f"계수 {s_cal['calibration_factor']}x) / {s_cal['daily_limit_mb']}MB "
+        f"잔여 {s_cal['remaining_mb']}MB | 챕터 {s_cal['chapters']}"
+    )
     log.info(f"collect 완료: {processed}개 처리, {len(remaining_queue)}개 남음")
     cs = get_collector_state() if (not source_filter or source_filter == "toki31") else {}
-    avg = s['used_mb'] / max(1, s['chapters']) if s['chapters'] else 0
+    avg = s_raw['used_mb'] / max(1, s_raw['chapters']) if s_raw['chapters'] else 0
     log.info(
-        f"  📊 트래픽 요약: {s['used_mb']:.1f}MB / {s['daily_limit_mb']}MB "
-        f"({s['chapters']}화, 화당 평균 {avg:.2f}MB)"
+        f"  📊 트래픽 요약: 유효 {s_cal['used_mb']:.1f}MB (출처:{s_cal['used_mb_source']}) / {s_cal['daily_limit_mb']}MB | "
+        f"원시 {s_raw['used_mb']:.1f}MB ({s_raw['chapters']}화, 화당 평균 {avg:.2f}MB)"
         + (f" | JS캐시={cs.get('js_cache',0)} hit={cs.get('js_hits',0)} wasm={cs.get('wasm_cache',0)}" if cs else "")
     )
 
@@ -1317,6 +1446,7 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
 
     _write_status({
         "phase": "collect",
+        "source": source_filter,
         "current": None,
         "index": total,
         "total": total,
@@ -1502,7 +1632,8 @@ def _load_queue() -> list:
 
 
 _QUEUE_LOCK_FILE = None
-_COLLECT_LOCK_FILE = None
+_COLLECT_GATE_FILE = None
+_COLLECT_SOURCE_LOCKS: dict = {}
 
 
 def _queue_lock():
@@ -1513,32 +1644,75 @@ def _queue_lock():
     return _QUEUE_LOCK_FILE
 
 
-def _collect_lock():
-    """run_collect 전용 락 파일 — queue.lock과 분리해 중첩 flock 무력화 방지.
+def _collect_gate_file():
+    """수집 게이트 락 — 전체 수집(EX)과 소스 수집(SH)의 상호 배제.
 
-    fcntl은 같은 프로세스에서 같은 fd에 flock을 걸면 이전 락을 대체한다.
-    따라서 _acquire_collect_lock(LOCK_EX) 상태에서 _load_queue가 같은 fd에
-    LOCK_SH를 걸면 collect 락이 다운그레이드/해제되는 심각한 버그가 있다.
-    별도 파일로 분리해 이 문제를 해결한다.
+    - source_filter 없는 전체 수집: LOCK_EX (모든 소스 수집 대기)
+    - source_filter 있는 소스 수집: LOCK_SH (다른 소스와 병렬 허용)
+
+    queue.lock과 분리해 중첩 flock 무력화 방지 (기존 설계 유지).
     """
-    global _COLLECT_LOCK_FILE
-    if _COLLECT_LOCK_FILE is None:
-        _COLLECT_LOCK_FILE = open(QUEUE_FILE.with_suffix('.collect.lock'), 'w')
-    return _COLLECT_LOCK_FILE
+    global _COLLECT_GATE_FILE
+    if _COLLECT_GATE_FILE is None:
+        _COLLECT_GATE_FILE = open(QUEUE_FILE.with_suffix('.collect.lock'), 'w')
+    return _COLLECT_GATE_FILE
 
 
-def _acquire_collect_lock():
-    """run_collect 전체 트랜잭션 락 — 두 프로세스가 동시에 queue를 처리하지 못하게."""
+def _collect_source_lock(source: str):
+    """소스 전용 배타 락 — 같은 source의 중복 collect 직렬화."""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in source)
+    fd = _COLLECT_SOURCE_LOCKS.get(safe)
+    if fd is None:
+        fd = open(QUEUE_FILE.with_suffix(f'.collect.{safe}.lock'), 'w')
+        _COLLECT_SOURCE_LOCKS[safe] = fd
+    return fd
+
+
+def _acquire_collect_lock(source_filter: str = "", blocking: bool = True) -> bool:
+    """수집 트랜잭션 락 — 소스별 동시 수집 + 전체/동일 소스 상호 배제.
+
+    순서: 게이트 → 소스 (deadlock 방지 — 항상 같은 순서).
+    blocking=False면 선점 시 False 반환 (부분 획득은 롤백).
+    """
     import fcntl
-    fcntl.flock(_collect_lock(), fcntl.LOCK_EX)
+    gate = _collect_gate_file()
+    if source_filter:
+        try:
+            fcntl.flock(
+                gate,
+                fcntl.LOCK_SH if blocking else (fcntl.LOCK_SH | fcntl.LOCK_NB),
+            )
+        except BlockingIOError:
+            return False
+        try:
+            fcntl.flock(
+                _collect_source_lock(source_filter),
+                fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB),
+            )
+        except BlockingIOError:
+            try:
+                fcntl.flock(gate, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            return False
+    else:
+        try:
+            fcntl.flock(
+                gate,
+                fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB),
+            )
+        except BlockingIOError:
+            return False
     return True
 
 
-def _release_collect_lock():
-    """run_collect 트랜잭션 락 해제."""
+def _release_collect_lock(source_filter: str = "") -> None:
+    """수집 트랜잭션 락 해제 (획득 역순: 소스 → 게이트)."""
     import fcntl
     try:
-        fcntl.flock(_collect_lock(), fcntl.LOCK_UN)
+        if source_filter:
+            fcntl.flock(_collect_source_lock(source_filter), fcntl.LOCK_UN)
+        fcntl.flock(_collect_gate_file(), fcntl.LOCK_UN)
     except Exception:
         pass
 
@@ -1647,7 +1821,13 @@ def _build_epub_for_drained_novels(remaining_queue: list, touched_novels: dict) 
     """
     if not touched_novels:
         return
-    from services.epub import maybe_build_epub
+    # [WARNING] import 실패(모듈 누락)가 바깥 except에 걸리지 않으면 루프 전체가
+    # 크래시한다 — import도 실패 허용 범위에 포함.
+    try:
+        from services.epub import maybe_build_epub
+    except Exception as e:
+        log.warning(f"  ⚠ EPUB 모듈 로드 실패 — 건너뜀: {type(e).__name__}: {e}")
+        return
 
     remaining_novel_ids = {
         q.get('novel_title', '').replace(' ', '_').replace('/', '_')
@@ -1846,21 +2026,30 @@ MISSING_FILE = WATCHER_DIR / 'missing.json'
 
 def _load_missing() -> dict:
     """missing.json 로드 (소설별 빠진 화수 목록)."""
-    if MISSING_FILE.exists():
-        try:
-            d = json.loads(MISSING_FILE.read_text(encoding="utf-8"))
-            return d if isinstance(d, dict) else {}
-        except Exception:
-            return {}
-    return {}
+    _json_file_lock(MISSING_FILE)
+    try:
+        if MISSING_FILE.exists():
+            try:
+                d = json.loads(MISSING_FILE.read_text(encoding="utf-8"))
+                return d if isinstance(d, dict) else {}
+            except Exception:
+                pass
+        return {}
+    finally:
+        _json_file_unlock(MISSING_FILE)
 
 
 def _save_missing(missing: dict) -> None:
     """missing.json 저장."""
+    _json_file_lock(MISSING_FILE)
     try:
-        MISSING_FILE.write_text(json.dumps(missing, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = MISSING_FILE.with_suffix(f'.tmp.{os.getpid()}')
+        tmp.write_text(json.dumps(missing, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, MISSING_FILE)
     except Exception as e:
         log.warning(f"missing.json 저장 실패: {e}")
+    finally:
+        _json_file_unlock(MISSING_FILE)
 
 
 def run_check_gaps(novel_filter: Optional[str] = None) -> dict:
@@ -2135,11 +2324,11 @@ def main():
 
     if cmd == "traffic":
         """일일 트래픽 사용량/한도 상태 출력."""
-        from lib.traffic_guard import summary, reset_if_new_day, seconds_until_next_day
+        from lib.traffic_guard import summary_calibrated, reset_if_new_day, seconds_until_next_day
         reset_if_new_day()
-        s = summary()
+        s = summary_calibrated()
         print(f"일일 한도:   {s['daily_limit_mb']} MB")
-        print(f"사용량:      {s['used_mb']} MB ({s['chapters']}회차)")
+        print(f"사용량:      {s['used_mb']} MB [{s['used_mb_source']}] (API:{s['used_mb_api']} / TG보정:{s['used_mb_tg_calibrated']} / 원시:{s['used_mb_raw']})")
         print(f"잔여:        {s['remaining_mb']} MB")
         print(f"한도 초과:   {'예' if s['exceeded'] else '아니오'}")
         if s['exceeded']:
@@ -2162,10 +2351,16 @@ def main():
         source = _parse_source()
         bo_table = _parse_bo_table()
         dry_run = "--dry-run" in sys.argv
-        # title과 max_pages는 --source/--dry-run 이전의 위치 인자
+        # title과 max_pages는 --source/--dry-run "이전" 위치 인자.
+        # 첫 플래그 이후 값(예: --source toki31의 toki31)을 제목으로 오인하지 않도록
+        # 첫 `--`에서 즉시 중단한다.
         title = ""
         pages = 50
-        positional = [a for a in sys.argv[3:] if not a.startswith("--")]
+        positional = []
+        for a in sys.argv[3:]:
+            if a.startswith("--"):
+                break
+            positional.append(a)
         if len(positional) > 0:
             title = positional[0]
         if len(positional) > 1:
@@ -2296,6 +2491,29 @@ def main():
                 # systemd watchdog 신호 (WatchdogSec 대응)
                 _sd_notify(f"cycle {cycle}")
 
+                # DataImpulse API 주기 갱신 (일일 한도 SSOT 신선도 유지)
+                _refresh_dataimpulse_periodic()
+
+                # 보정 계수 비상 중지 확인 (20% 이상 급변 5회 연속 시)
+                try:
+                    from lib.traffic_guard import is_calibration_emergency
+                    if is_calibration_emergency():
+                        log.critical(
+                            "🚨 보정 계수 비상 중지 감지! "
+                            "20% 이상 급변이 5회 연속 발생하여 파이프라인을 중지합니다. "
+                            "사용자 개입 필요: traffic_state.json의 calibration_emergency_stop=false로 설정 후 재시작"
+                        )
+                        # 상태 파일에 비상 중지 기록
+                        import json
+                        status_data = json.loads(STATUS_FILE.read_text(encoding='utf-8')) if STATUS_FILE.exists() else {}
+                        status_data.update({"phase": "emergency_stop", "emergency_reason": "calibration_spike_5x"})
+                        _write_status(status_data)
+                        raise SystemExit("CALIBRATION_EMERGENCY_STOP")
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    log.warning(f"보정 계수 비상 중지 확인 실패: {e}")
+
                 # 도메인 헬스체크 (30분 간격, 사이트 주소 변경 시 자동 전환)
                 try:
                     _check_domain_health_once()
@@ -2333,22 +2551,18 @@ def main():
                 cycle_remaining = 0
                 traffic_exceeded_any = False
                 for src in sources:
-                    result = run_collect(limit=1, source_filter=src)
+                    # blocking=False: 다른 프로세스가 같은 소스 collect 중이면
+                    # skip — loop가 한 소스 락에 묶여 다른 소스/사이클을 멈추지 않음
+                    result = run_collect(limit=1, source_filter=src, blocking=False)
                     cycle_processed += result.get('processed', 0)
                     cycle_remaining += result.get('remaining', 0)
                     if result.get('traffic_exceeded'):
                         traffic_exceeded_any = True
                         log.warning(f"  [{src}] 일일 트래픽 한도 도달 — {src}만 자정까지 대기")
+                    elif result.get('lock_busy'):
+                        log.debug(f"  [{src}] collect 락 선점 — 건너뜀")
 
-                    # toki31 수집 시 DataImpulse 대시보드 확인 (10화마다)
-                    if src == "toki31" and result.get('processed', 0) > 0:
-                        try:
-                            from lib.dataimpulse_monitor import _check_dataimpulse_usage
-                            _check_dataimpulse_usage()
-                        except Exception as e:
-                            log.warning(f"  DataImpulse 대시보드 확인 실패: {e}")
-
-                # 유료 소스가 전부 한도 도달이면 자정까지 대기 (무료 소스는 위에서 이미 처리)
+                    # 유료 소스가 전부 한도 도달이면 자정까지 대기 (무료 소스는 위에서 이미 처리)
                 if traffic_exceeded_any and cycle_processed == 0:
                     from lib.traffic_guard import seconds_until_next_day
                     wait = seconds_until_next_day()
