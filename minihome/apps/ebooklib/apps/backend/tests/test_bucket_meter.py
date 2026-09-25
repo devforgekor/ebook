@@ -555,3 +555,45 @@ def test_load_facts_should_skip_corrupt_lines(tmp_path):
     facts = load_facts(p)
     assert [f["event_id"] for f in facts] == ["a", "b"]
     assert load_facts(tmp_path / "missing.jsonl") == []
+
+
+def _ok_fact(config_hash, api_kb, tg_kb=180.0, chapters=10, from_ts=0.0):
+    return {
+        "config_hash": config_hash,
+        "quality": "ok",
+        "size": chapters,
+        "consumed_chapters": chapters,
+        "api_mb_delta": api_kb * chapters / 1024,
+        "tg_bytes_delta": int(tg_kb * chapters * 1024),
+        "r": 1.8,
+        "fail_count": 0,
+        "from_ts": from_ts,
+    }
+
+
+def test_compare_configs_should_report_reduction_and_verdict():
+    from lib.bucket_meter import compare_configs
+
+    facts = [_ok_fact("base", 100.0), _ok_fact("treat", 90.0)]
+    out = compare_configs(facts, "base", "treat")
+    assert out["delta_pct"] == -10.0
+    assert out["reduction_pct"] == 10.0
+    assert out["verdict"] == "adopt_next"
+
+    facts = [_ok_fact("base", 100.0), _ok_fact("treat", 97.0)]
+    assert compare_configs(facts, "base", "treat")["verdict"] == "rollback"
+
+    facts = [_ok_fact("base", 100.0), _ok_fact("treat", 105.0)]
+    assert compare_configs(facts, "base", "treat")["verdict"] == "rollback"
+
+
+def test_aa_report_should_flag_variance_over_threshold():
+    from lib.bucket_meter import aa_report
+
+    stable = [_ok_fact("x", 100.0, tg_kb=v, from_ts=float(i)) for i, v in enumerate([100, 100, 100, 104])]
+    out = aa_report(stable, "x")
+    assert out["delta_pct"] == 2.0
+    assert out["ok"] is True
+
+    noisy = [_ok_fact("x", 100.0, tg_kb=v, from_ts=float(i)) for i, v in enumerate([100, 100, 100, 130])]
+    assert aa_report(noisy, "x")["ok"] is False

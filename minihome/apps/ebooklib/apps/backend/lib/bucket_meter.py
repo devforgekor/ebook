@@ -432,6 +432,94 @@ def bucket_ratio(fact: dict) -> float | None:
     return fact.get("r")
 
 
+def facts_by_config(facts: Sequence[dict], config_hash: str) -> list[dict]:
+    """특정 config_hash로 태깅된 팩트만."""
+    return [f for f in facts if f.get("config_hash") == config_hash]
+
+
+def _metric_median(facts: Sequence[dict], metric: str) -> float | None:
+    vals: list[float] = []
+    for f in facts:
+        chapters = f.get("consumed_chapters") or 0
+        if metric == "api_kb_per_chapter":
+            if f.get("quality") == QUALITY_OK and f.get("api_mb_delta") and chapters:
+                vals.append(f["api_mb_delta"] * _KB / chapters)
+        elif metric == "tg_kb_per_chapter":
+            if chapters and f["tg_bytes_delta"] > 0:
+                vals.append(f["tg_bytes_delta"] / _KB / chapters)
+        elif metric == "r":
+            if f.get("r"):
+                vals.append(f["r"])
+    return round(median(vals), 4) if vals else None
+
+
+def _group_stats(facts: Sequence[dict]) -> dict:
+    ok = [f for f in facts if f.get("quality") == QUALITY_OK and f.get("consumed_chapters")]
+    return {
+        "n": len(facts),
+        "n_ok": len(ok),
+        "api_kb_per_chapter_median": _metric_median(facts, "api_kb_per_chapter"),
+        "tg_kb_per_chapter_median": _metric_median(facts, "tg_kb_per_chapter"),
+        "r_median": _metric_median(facts, "r"),
+        "fail_count": sum(int(f.get("fail_count", 0) or 0) for f in facts),
+    }
+
+
+def compare_configs(
+    facts: Sequence[dict],
+    baseline_hash: str,
+    treatment_hash: str,
+    metric: str = "api_kb_per_chapter",
+) -> dict:
+    """baseline/treatment 두 config의 OEC 비교 — 절감률/판정(계획 §6).
+
+    감소율 = (baseline - treatment)/baseline × 100. ≥10% 다음 단계, ≥5% 채택, <5% 롤백.
+    """
+    base = _group_stats(facts_by_config(facts, baseline_hash))
+    treat = _group_stats(facts_by_config(facts, treatment_hash))
+    b, t = base.get(f"{metric}_median"), treat.get(f"{metric}_median")
+    delta = round((t - b) / b * 100, 1) if (b and t and b > 0) else None
+    if delta is None:
+        verdict = "insufficient"
+    elif -delta >= 10:
+        verdict = "adopt_next"
+    elif -delta >= 5:
+        verdict = "adopt"
+    else:
+        verdict = "rollback"
+    return {
+        "metric": metric,
+        "baseline": base,
+        "treatment": treat,
+        "delta_pct": delta,
+        "reduction_pct": round(-delta, 1) if delta is not None else None,
+        "verdict": verdict,
+    }
+
+
+def aa_report(
+    facts: Sequence[dict], config_hash: str | None = None, metric: str = "tg_kb_per_chapter"
+) -> dict:
+    """동일 config 팩트를 전/후반으로 나눠 A/A 변동성 확인(작을수록 양호)."""
+    series = list(facts if config_hash is None else facts_by_config(facts, config_hash))
+    series = [f for f in series if f.get("consumed_chapters")]
+    series.sort(key=lambda f: f.get("from_ts") or 0)
+    if len(series) < 4:
+        return {"n": len(series), "delta_pct": None, "ok": False, "note": "need >= 4 buckets"}
+    mid = len(series) // 2
+    first, second = _group_stats(series[:mid]), _group_stats(series[mid:])
+    m1, m2 = first.get(f"{metric}_median"), second.get(f"{metric}_median")
+    delta = round((m2 - m1) / m1 * 100, 1) if (m1 and m2) else None
+    return {
+        "n": len(series),
+        "metric": metric,
+        "first_half": first,
+        "second_half": second,
+        "delta_pct": delta,
+        "ok": delta is not None and abs(delta) < 5.0,
+    }
+
+
 def load_facts(path: str | Path = DEFAULT_OUT_PATH) -> list[dict]:
     """append-only fact JSONL 로드(손상 라인은 건너뜀)."""
     target = Path(path)
@@ -717,6 +805,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--out", default=None, help="버킷 팩트 JSONL append 경로")
     parser.add_argument("--json", action="store_true", help="JSON 출력")
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BASE_HASH", "TREAT_HASH"),
+        help="config_hash 두 개 OEC 비교",
+    )
+    parser.add_argument("--aa", action="store_true", help="동일 config 전/후반 A/A 변동성")
     args = parser.parse_args(argv)
 
     if args.size < 1:
@@ -734,6 +829,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     facts = build_buckets(chapters, points, args.size, source=args.source)
+    if args.compare:
+        print(
+            json.dumps(
+                compare_configs(facts, args.compare[0], args.compare[1]),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.aa:
+        print(json.dumps(aa_report(facts), ensure_ascii=False, indent=2))
+        return 0
     summary = report(facts)
     if args.out:
         summary["append"] = append_facts(args.out, facts)
