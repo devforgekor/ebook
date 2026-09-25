@@ -788,3 +788,45 @@ class TestMunpiaSearch:
             else:
                 _s.modules["requests"] = real
         assert out is None
+
+
+class TestKakaoSearch:
+    def _patch(self, routes):
+        import sys as _s
+
+        class _Resp:
+            def __init__(self, data): self.status_code=200; self._d=data
+            def json(self): return self._d
+
+        class _Req:
+            def get(self, url, params=None, **k):
+                for frag, data in routes.items():
+                    if frag in url:
+                        return _Resp(data)
+                return _Resp({"result": {"list": []}})
+
+        real = _s.modules.get("requests")
+        _s.modules["requests"] = _Req()
+        return real
+
+    def test_kakao_search_should_extract_total_and_finished(self):
+        from services import metadata_search as ms
+
+        routes = {
+            "search/series": {"result": {"list": [
+                {"type": "SERIES", "series_id": 42, "title": "회귀의 절대자[완결]",
+                 "authors": "원태랑", "state": "ST61", "thumbnail": "abc", "category": "웹소설", "sub_category": "판타지"},
+            ]}},
+            "product/list": {"result": {"total_count": 150}},
+        }
+        real = self._patch(routes)
+        try:
+            out = ms.search_kakao("회귀의 절대자")
+        finally:
+            if real is None: __import__("sys").modules.pop("requests", None)
+            else: __import__("sys").modules["requests"] = real
+        assert out["author"] == "원태랑"
+        assert out["total_chapters"] == 150
+        assert out["status"] == "완결"
+        assert out["source_url"].endswith("/42")
+        assert out["source"] == "official:kakao"

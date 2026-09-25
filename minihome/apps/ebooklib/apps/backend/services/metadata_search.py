@@ -147,8 +147,112 @@ def search_munpia(title: str, timeout: float = 12.0) -> Optional[dict]:
     return None
 
 
+KAKAO_SEARCH_API = "https://bff-page.kakao.com/api/gateway/api/v2/search/series"
+KAKAO_PRODUCT_API = "https://bff-page.kakao.com/api/gateway/api/v2/content/product/list"
+
+# 카카오 state 코드(일부) → 상태. 미상은 unknown(추측 금지).
+_KAKAO_STATE = {"ST61": "연재중", "ST62": "완결", "ST01": "연재중"}
+
+
+def _kakao_get(url: str, params: dict, timeout: float = 12.0):
+    """카카오 BFF API 호출 — Cloudflare/WAF 때문에 일반 requests는 403.
+
+    [WHY] 실측: requests는 403. 브라우저(Playwright) 컨텍스트로만 접근 가능하므로
+    필요 시 브라우저로 폴백한다(콜드 1회 부담, 메타 갱신은 드묾).
+    """
+    try:
+        import requests
+
+        r = requests.get(
+            url, params=params,
+            headers={**_HEADERS, "Accept": "application/json", "Referer": "https://page.kakao.com/"},
+            timeout=timeout, verify=False,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:  # noqa: BLE001
+        pass
+    return _kakao_get_via_browser(url, params, timeout)
+
+
+def _kakao_get_via_browser(url: str, params: dict, timeout: float = 12.0):
+    """Playwright로 API 호출(쿼리 문자열 직접 이동 후 JSON 파싱)."""
+    try:
+        import asyncio
+        from urllib.parse import urlencode
+
+        from playwright.async_api import async_playwright
+
+        full = f"{url}?{urlencode(params)}"
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+
+        async def _run():
+            async with async_playwright() as p:
+                b = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                ctx = await b.new_context(user_agent=ua, locale="ko-KR")
+                pg = await ctx.new_page()
+                # 카카오 도메인 컨텍스트(쿠키/WAF 통과) 확보 후 API 이동
+                await pg.goto("https://page.kakao.com/", wait_until="domcontentloaded", timeout=40000)
+                resp = await pg.goto(full, wait_until="domcontentloaded", timeout=40000)
+                data = None
+                try:
+                    data = await resp.json()
+                except Exception:
+                    body = await pg.inner_text("pre") if await pg.query_selector("pre") else ""
+                    import json as _json
+
+                    try:
+                        data = _json.loads(body)
+                    except Exception:
+                        data = None
+                await b.close()
+                return data
+
+        return asyncio.run(_run())
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"카카오 브라우저 API 실패: {e}")
+        return None
+
+
+def search_kakao(title: str, timeout: float = 15.0) -> Optional[dict]:
+    """카카오페이지 검색 → 정규화 메타(작가/총화수/상태/표지)."""
+    data = _kakao_get(
+        KAKAO_SEARCH_API, {"keyword": title, "category": "all", "sort": "ACCURACY", "page": 0}, timeout
+    )
+    items = ((data or {}).get("result") or {}).get("list") or []
+    for it in items:
+        if it.get("type") != "SERIES" or not title_matches(title, it.get("title", "")):
+            continue
+        sid = it.get("series_id")
+        total = None
+        prod = _kakao_get(KAKAO_PRODUCT_API, {"series_id": sid, "page": 0, "size": 1}, timeout)
+        if prod:
+            total = ((prod.get("result") or {}).get("total_count"))
+        raw_title = it.get("title", "")
+        status = _KAKAO_STATE.get(it.get("state"), "unknown")
+        if "완결" in raw_title:
+            status = "완결"
+        return {
+            "title": raw_title,
+            "author": (it.get("authors") or "").strip(),
+            "description": it.get("description") or "",
+            "cover_url": (f"https://dn-img-page.kakao.com/download/resource?kid={it['thumbnail']}"
+                          if it.get("thumbnail") else None),
+            "status": status,
+            "total_chapters": total,
+            "publisher": "카카오페이지",
+            "source_url": f"https://page.kakao.com/content/{sid}",
+            "source": "official:kakao",
+            "genre": [g for g in (it.get("category"), it.get("sub_category")) if g],
+        }
+    return None
+
+
 def find_official(title: str) -> Optional[dict]:
-    """제목으로 공식 메타 검색 — 네이버 시리즈 → 문피아 → (접근 가능 시) 기타.
+    """제목으로 공식 메타 검색 — 네이버 시리즈 → 문피아 → 카카오 → (접근 가능 시) 기타.
 
     Returns: metadata_official.parse_platform 형태의 dict 또는 None.
     """
@@ -160,8 +264,12 @@ def find_official(title: str) -> Optional[dict]:
     meta = search_munpia(title)
     if meta:
         return meta
-    # 3차: 나머지는 클라이언트 렌더링/차단이 잦아 시도만 하고 스킵
-    for platform in ("kakao", "ridi", "joara"):
+    # 3차: 카카오페이지(BFF API — Playwright 폴백 필요할 수 있음)
+    meta = search_kakao(title)
+    if meta:
+        return meta
+    # 4차: 리디/조아라는 접근 차단이 잦아 시도만 하고 스킵
+    for platform in ("ridi", "joara"):
         tmpl, _ = _SEARCH_ENDPOINTS[platform]
         if not _fetch(tmpl.format(q=quote(title))):
             logger.debug(f"{platform} 검색 접근 불가 — 스킵")
