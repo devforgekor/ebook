@@ -100,8 +100,55 @@ def search_naver(title: str, timeout: float = 12.0) -> Optional[dict]:
     return meta
 
 
+MUNPIA_API = "https://www.munpia.com/api/v1/main/search"
+
+
+def search_munpia(title: str, timeout: float = 12.0) -> Optional[dict]:
+    """문피아 검색 API(비로그인, JSON) → 정규화 메타.
+
+    [WHY] 문피아는 SPA지만 검색 API가 열려 있어 JSON으로 작가/총화수(entryCount)/
+    완결여부/표지/줄거리를 안정적으로 얻는다. 제목 일치 검증으로 오매칭을 막는다.
+    """
+    try:
+        import requests
+
+        r = requests.get(
+            MUNPIA_API,
+            params={
+                "query": title, "tab": "NOVEL", "sort": "SIMILARITY",
+                "novelType": "ALL", "finishedOnly": "false", "adultMode": "false",
+                "page": 0, "size": 10,
+            },
+            headers={**_HEADERS, "Accept": "application/json", "Referer": "https://www.munpia.com/"},
+            timeout=timeout, verify=False,
+        )
+        if r.status_code != 200:
+            return None
+        items = (r.json().get("result") or {}).get("searchNovelTabDtos") or []
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"문피아 검색 실패: {e}")
+        return None
+    for it in items:
+        if not title_matches(title, it.get("title", "")):
+            continue
+        novel_id = it.get("novelId")
+        return {
+            "title": it.get("title", ""),
+            "author": it.get("author", ""),
+            "description": (it.get("story") or "")[:500],
+            "cover_url": it.get("coverUrl"),
+            "status": "완결" if it.get("finished") else "연재중",
+            "total_chapters": it.get("entryCount"),
+            "publisher": "문피아",
+            "source_url": f"https://www.munpia.com/novel/detail/{novel_id}",
+            "source": "official:munpia",
+            "genre": [g for g in (it.get("mainGenre"), it.get("subGenre")) if g],
+        }
+    return None
+
+
 def find_official(title: str) -> Optional[dict]:
-    """제목으로 공식 메타 검색 — 네이버 우선, 실패 시 접근 가능한 플랫폼만 시도.
+    """제목으로 공식 메타 검색 — 네이버 시리즈 → 문피아 → (접근 가능 시) 기타.
 
     Returns: metadata_official.parse_platform 형태의 dict 또는 None.
     """
@@ -109,8 +156,12 @@ def find_official(title: str) -> Optional[dict]:
     meta = search_naver(title)
     if meta:
         return meta
-    # 2차: 나머지는 클라이언트 렌더링/차단이 잦아 시도만 하고 스킵
-    for platform in ("kakao", "ridi", "munpia", "joara"):
+    # 2차: 문피아(검색 API JSON — 작가·총화수·완결 정확)
+    meta = search_munpia(title)
+    if meta:
+        return meta
+    # 3차: 나머지는 클라이언트 렌더링/차단이 잦아 시도만 하고 스킵
+    for platform in ("kakao", "ridi", "joara"):
         tmpl, _ = _SEARCH_ENDPOINTS[platform]
         if not _fetch(tmpl.format(q=quote(title))):
             logger.debug(f"{platform} 검색 접근 불가 — 스킵")

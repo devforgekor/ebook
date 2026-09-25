@@ -720,3 +720,71 @@ class TestMetadataSearch:
         assert out["total_chapters"] == 896
         assert out["author"] == "장영훈"
         assert out["status"] == "연재중"
+
+
+class TestMunpiaSearch:
+    def test_munpia_parse_shape(self):
+        import json
+
+        from services import metadata_search as ms
+
+        payload = {
+            "result": {
+                "searchNovelTabDtos": [
+                    {"title": "테스트작", "author": "작가A", "novelId": 123, "entryCount": 50,
+                     "finished": True, "coverUrl": "https://cdn/x", "story": "줄거리",
+                     "mainGenre": "무협", "subGenre": "퓨전"},
+                ]
+            }
+        }
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return payload
+
+        class _Req:
+            def get(self, *a, **k):
+                return _Resp()
+
+        import sys as _s
+        real = _s.modules.get("requests")
+        _s.modules["requests"] = _Req()
+        try:
+            out = ms.search_munpia("테스트작")
+        finally:
+            if real is None:
+                _s.modules.pop("requests", None)
+            else:
+                _s.modules["requests"] = real
+        assert out["author"] == "작가A"
+        assert out["total_chapters"] == 50
+        assert out["status"] == "완결"
+        assert out["source"] == "official:munpia"
+        assert out["source_url"].endswith("/123")
+
+    def test_munpia_should_reject_mismatched_title(self):
+        from services import metadata_search as ms
+
+        payload = {"result": {"searchNovelTabDtos": [{"title": "완전 다른 작품", "author": "x", "novelId": 1}]}}
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return payload
+
+        class _Req:
+            def get(self, *a, **k):
+                return _Resp()
+
+        import sys as _s
+        real = _s.modules.get("requests")
+        _s.modules["requests"] = _Req()
+        try:
+            out = ms.search_munpia("절대회귀")
+        finally:
+            if real is None:
+                _s.modules.pop("requests", None)
+            else:
+                _s.modules["requests"] = real
+        assert out is None
