@@ -593,17 +593,10 @@ def _update_novel_status_from_discover(
 
 
 def _normalize_toki_title(raw: str) -> str:
-    """toki31 제목 정규화: '제목 - 작가 | 사이트' → '제목'.
+    """toki31 제목 정규화 — 공통 text_clean으로 위임(사이트/작가 접미 제거)."""
+    from lib.text_clean import clean_title
 
-    사이트 og:title 형식이 '제목 - 작가 | 뉴토끼'이므로 site/author 접미사를 제거해
-    디렉터리/DB 제목을 깨끗하게 유지한다. (중복 디렉터리 방지)
-    """
-    t = (raw or "").strip()
-    if "|" in t:
-        t = t.split("|", 1)[0].strip()
-    if " - " in t:
-        t = t.rsplit(" - ", 1)[0].strip()
-    return t or (raw or "").strip()
+    return clean_title(raw) or (raw or "").strip()
 
 
 def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False) -> int:
@@ -812,22 +805,10 @@ def _download_cover(novel_title: str, cover_url: str) -> Optional[str]:
 
 
 def _clean_page_title(title: str) -> str:
-    """<title>에서 사이트명/회차 번호 접미 제거 → 순수 작품 제목.
+    """<title>에서 사이트명/회차 번호 접미 제거 → 순수 작품 제목(공통 위임)."""
+    from lib.text_clean import clean_title
 
-    예:
-      "문종이 화폐를 거부함 - 217화"  → "문종이 화폐를 거부함"
-      "하남자의 탑 공략법 | 북토끼"   → "하남자의 탑 공략법"
-    """
-    import re as _re
-    t = (title or "").strip()
-    # 사이트명 접미 제거 (다양한 토끼 도메인 + 한글 표기)
-    t = _re.sub(
-        r"\s*[-–|]\s*(?:북토끼|뉴토끼|bookto31|bookto21|newto31|newtoki).*",
-        "", t, flags=_re.IGNORECASE,
-    )
-    # 회차 번호 접미 제거 (" - 217화/편/장")
-    t = _re.sub(r"\s*[-–|]\s*\d+\s*(?:화|편|장)\s*$", "", t)
-    return t.strip()
+    return clean_title(title)
 
 
 def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source: str = "bookto31", dry_run: bool = False, bo_table: str = "novel") -> int:

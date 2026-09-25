@@ -219,10 +219,12 @@ def update_meta_from_official(
         with open(meta_file, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
+        from lib.text_clean import clean_author, clean_title
+
         if official_meta.get("title"):
-            meta["title"] = official_meta["title"]
+            meta["title"] = clean_title(official_meta["title"]) or meta.get("title", "")
         if official_meta.get("author"):
-            meta["author"] = official_meta["author"]
+            meta["author"] = clean_author(official_meta["author"])
         if official_meta.get("cover_url"):
             meta["coverUrl"] = official_meta["cover_url"]
         if official_meta.get("description"):
@@ -274,8 +276,12 @@ def update_meta_from_namu(
         with open(meta_file, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
+        from lib.text_clean import clean_author, clean_title
+
         if namu_meta.get("author"):
-            meta["author"] = namu_meta["author"]
+            meta["author"] = clean_author(namu_meta["author"])
+        if namu_meta.get("title"):
+            meta["title"] = clean_title(namu_meta["title"]) or meta.get("title", "")
         if namu_meta.get("cover_url"):
             meta["coverUrl"] = namu_meta["cover_url"]
         if namu_meta.get("description"):

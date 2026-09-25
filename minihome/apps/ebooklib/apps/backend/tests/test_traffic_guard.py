@@ -663,3 +663,36 @@ class TestDiscoverCompletion:
         for _ in range(pl.NO_NEW_STREAK_COMPLETE + 2):
             pl._update_novel_status_from_discover(meta, 0, "T", discovered_ok=True)
         assert meta["status"] == "연재중"
+
+
+class TestTextClean:
+    def test_clean_title_should_strip_site_and_author_suffix(self):
+        from lib.text_clean import clean_title
+
+        assert clean_title("동생이 천재였다 - 시하 | 뉴토끼") == "동생이 천재였다"
+        assert clean_title("[뉴토끼] 필드의 고인물") == "필드의 고인물"
+        assert clean_title("절대회귀 - 215화") == "절대회귀"
+        assert clean_title("하남자의 탑 공략법 | 북토끼") == "하남자의 탑 공략법"
+
+    def test_clean_title_should_collapse_whitespace_and_zero_width(self):
+        from lib.text_clean import clean_title
+
+        assert clean_title("  화산 귀환\u200b  ") == "화산 귀환"
+        assert clean_title("제목\n\t부제") == "제목 부제"
+
+    def test_clean_author_should_strip_labels_and_normalize(self):
+        from lib.text_clean import clean_author
+
+        assert clean_author("작가: 정윤강") == "정윤강"
+        assert clean_author("글쓴이 - 슬리버") == "슬리버"
+        assert clean_author("홍길동(작가)") == "홍길동"
+        assert clean_author("없음") == "미상"
+        assert clean_author("") == ""
+        assert clean_author("슬리버") == "슬리버"
+
+    def test_normalize_meta_should_clean_both_fields(self):
+        from lib.text_clean import normalize_meta
+
+        out = normalize_meta({"title": "T - 작가 | 뉴토끼", "author": "작가: A"})
+        assert out["title"] == "T"
+        assert out["author"] == "A"
