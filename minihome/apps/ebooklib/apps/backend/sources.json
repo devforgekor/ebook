@@ -1,6 +1,8 @@
 {
   "bookto31": {
-    "domains": ["23.ondobook.net"],
+    "domains": [
+      "23.ondobook.net"
+    ],
     "base_url": "https://23.ondobook.net",
     "collector": "bookto31",
     "discover": "gnuboard",
@@ -10,8 +12,10 @@
     "traffic_limited": false
   },
   "toki31": {
-    "domains": ["toki31.com", "newtoki31.com"],
-    "base_url": "https://toki31.com",
+    "domains": [
+      "newtoki31.com"
+    ],
+    "base_url": "https://newtoki31.com",
     "collector": "toki31",
     "discover": "toki31_episodes",
     "speed_hint_sec": 5,
@@ -20,7 +24,9 @@
     "traffic_limited": true
   },
   "newto31": {
-    "domains": ["newto31.com"],
+    "domains": [
+      "newto31.com"
+    ],
     "base_url": "https://newto31.com",
     "collector": "bookto31",
     "discover": "gnuboard",

@@ -17,7 +17,7 @@ toki31의 anti-bot 보호를 우회하기 위해 Playwright 브라우저를 사�
 - 브라우저/컨텍스트/페이지를 프로세스 수명 동안 재사용 (회차마다 Chromium 재실행 방지
   → JS 번들·쿠키 재사용, 회차당 다운로드 급감)
 - 불필요 리소스 차단: image/font/media/stylesheet → route.abort() (본문 추출엔 불필요)
-- 프록시 우선순위: MaskProxy($0.87/GB) → DataImpulse($1/GB)
+- 프록시: DataImpulse 단일 (MaskProxy 폴백 제거 — toki31 통과 불가)
 """
 
 import asyncio
@@ -27,6 +27,9 @@ import json
 import logging
 import os
 import re
+import select
+import socket
+import threading
 from typing import Optional, Tuple
 
 from lib.sources import get_base_url
@@ -45,12 +48,10 @@ def _toki_base() -> str:
     """최신 toki31 base_url (도메인 자동 전환 반영)."""
     return get_base_url("toki31")
 
-# 프록시 우선순위: DataImpulse(주력, 충전분 소모) → MaskProxy(폴백)
-_PROXY_PRIORITY = ("dataimpulse", "maskproxy")
-_PROXY_DEFAULTS = {
-    "maskproxy": ("MASKPROXY", "gw.maskproxy.io", "1288"),
-    "dataimpulse": ("DATAIMPULSE", "gw.dataimpulse.com", "823"),
-}
+# 프록시: DataImpulse 단일 (MaskProxy는 toki31 통과 불가 → 폴백 제거)
+_PROXY_PREFIX = "DATAIMPULSE"
+_PROXY_DEFAULT_HOST = "gw.dataimpulse.com"
+_PROXY_DEFAULT_PORT = "823"
 
 # 본문 추출에 불필요한 리소스 → 차단 (트래픽 절약)
 _BLOCKED_RESOURCE_TYPES = ("image", "font", "media", "stylesheet")
@@ -97,41 +98,47 @@ def _parse_proxy_key(value: str):
 
 
 def _load_proxy_env():
-    """프록시 자격증명 로드.
+    """프록시 자격증명 로드 (DataImpulse 단일).
 
     우선순위:
-    1. 개별 env var (MASKPROXY_USER 등, Key Vault 주입)
-    2. KV 결합 키 (MASKPROXY_PROXY_KEY / DATAIMPULSE_PROXY_KEY = user:pass@host:port) 파싱
-    3. .env.local 파일 (호환성 유지)
+    1. 개별 env var (Key Vault 주입)
+       DATAIMPULSE_API_KEY / DATAIMPULSE_LOGIN / DATAIMPULSE_USER → USER
+    2. KV 결합 키 (DATAIMPULSE_PROXY_KEY = user:pass@host:port) 파싱
+    3. .env.local 파일 (로컬 개발 템플릿)
     """
     env = {}
 
     # 1. 개별 환경변수 우선 (Key Vault)
     proxy_keys = [
-        'MASKPROXY_USER', 'MASKPROXY_PASS', 'MASKPROXY_HOST', 'MASKPROXY_PORT',
-        'DATAIMPULSE_USER', 'DATAIMPULSE_PASS', 'DATAIMPULSE_HOST', 'DATAIMPULSE_PORT'
+        'DATAIMPULSE_USER', 'DATAIMPULSE_PASS', 'DATAIMPULSE_HOST', 'DATAIMPULSE_PORT',
+        'DATAIMPULSE_API_KEY', 'DATAIMPULSE_LOGIN',
     ]
     for key in proxy_keys:
         val = os.environ.get(key)
         if val:
             env[key] = val
 
-    # 2. KV 결합 키 파싱 (개별 키 미설정 시)
-    for prefix in ('MASKPROXY', 'DATAIMPULSE'):
-        if env.get(f'{prefix}_USER'):
-            continue
-        combined = os.environ.get(f'{prefix}_PROXY_KEY', '')
-        if not combined and os.path.exists(ENV_LOCAL):
-            with open(ENV_LOCAL) as f:
-                for line in f:
-                    if line.strip().startswith(f'{prefix}_PROXY_KEY='):
-                        combined = line.split('=', 1)[1].strip().strip('"').strip("'")
-                        break
-        if combined:
-            u, p, h, pt = _parse_proxy_key(combined)
-            for suffix, val in (('USER', u), ('PASS', p), ('HOST', h), ('PORT', pt)):
-                if val:
-                    env.setdefault(f'{prefix}_{suffix}', val)
+    # 1b. KV 시크릿 이름 매핑: DATAIMPULSE-API-KEY/-LOGIN → USER
+    if not env.get('DATAIMPULSE_USER'):
+        mapped = env.get('DATAIMPULSE_API_KEY') or env.get('DATAIMPULSE_LOGIN')
+        if mapped:
+            env['DATAIMPULSE_USER'] = mapped
+
+    # 2. KV 결합 키 파싱 — 개별 필드가 없으면 채운다.
+    #    [WHY] 개별 PASS 가 없고 API-KEY(USER)만 있어도 동작해야 하므로
+    #    USER 존재 여부와 무관하게 항상 파싱하고 setdefault(명시값 우선).
+    combined = os.environ.get('DATAIMPULSE_PROXY_KEY', '')
+    if not combined and os.path.exists(ENV_LOCAL):
+        with open(ENV_LOCAL) as f:
+            for line in f:
+                if line.strip().startswith('DATAIMPULSE_PROXY_KEY='):
+                    combined = line.split('=', 1)[1].strip().strip('"').strip("'")
+                    break
+    if combined:
+        u, p, h, pt = _parse_proxy_key(combined)
+        for suffix, val in (('USER', u), ('PASS', p), ('HOST', h), ('PORT', pt)):
+            if val:
+                env.setdefault(f'DATAIMPULSE_{suffix}', val)
 
     # 3. Fallback: .env.local 파일 (환경변수에 없는 것만)
     if os.path.exists(ENV_LOCAL):
@@ -144,6 +151,168 @@ def _load_proxy_env():
                     if k not in env:  # 환경변수가 우선
                         env[k] = v.strip()
     return env
+
+
+def _basic_proxy_auth(username: str, password: str) -> str:
+    """Basic Proxy-Authorization 헤더 값 (Bearer 제외)."""
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return f"Basic {token}"
+
+
+def _inject_proxy_auth(request_head: bytes, auth_header: str) -> bytes:
+    """CONNECT/HTTP 요청 헤더에 Proxy-Authorization 주입 (기존 값 교체).
+
+    [WHY] DataImpulse는 407 챌린지 없이 익명 CONNECT를 200으로 열고(무작위 geo),
+    KR 타깃팅(`username__cr.kr`)은 Proxy-Authorization에만 반영된다.
+    Chromium/Playwright는 407 전까지 자격증명을 보내지 않아 비한국 IP가 됨.
+    """
+    lines = request_head.split(b"\r\n")
+    if not lines:
+        return request_head
+    out = [lines[0]]
+    auth_line = f"Proxy-Authorization: {auth_header}".encode()
+    replaced = False
+    for ln in lines[1:]:
+        if ln.lower().startswith(b"proxy-authorization:"):
+            if not replaced:
+                out.append(auth_line)
+                replaced = True
+            continue
+        out.append(ln)
+    if not replaced:
+        out.append(auth_line)
+    return b"\r\n".join(out)
+
+
+_inject_proxy_lock = threading.Lock()
+_inject_proxy_server: Optional[socket.socket] = None
+_inject_proxy_port: Optional[int] = None
+_inject_proxy_token: Optional[str] = None
+_inject_proxy_upstream: Optional[Tuple[str, int]] = None
+_inject_proxy_thread: Optional[threading.Thread] = None
+
+
+def _pump(a: socket.socket, b: socket.socket) -> None:
+    try:
+        while True:
+            r, _, _ = select.select([a, b], [], [], 60)
+            if not r:
+                return
+            for s in r:
+                data = s.recv(65536)
+                if not data:
+                    return
+                (b if s is a else a).sendall(data)
+    except OSError:
+        return
+
+
+def _inject_handle_client(client: socket.socket, token: str, upstream: Tuple[str, int]) -> None:
+    try:
+        client.settimeout(60)
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = client.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+        head, rest = buf.split(b"\r\n\r\n", 1)
+        head = _inject_proxy_auth(head, token)
+        up = socket.create_connection(upstream, timeout=30)
+        try:
+            up.sendall(head + b"\r\n\r\n" + rest)
+            _pump(client, up)
+        finally:
+            try:
+                up.close()
+            except OSError:
+                pass
+    except OSError:
+        return
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+
+
+def _inject_proxy_loop(server: socket.socket, token: str, upstream: Tuple[str, int]) -> None:
+    while True:
+        try:
+            client, _ = server.accept()
+        except OSError:
+            return
+        threading.Thread(
+            target=_inject_handle_client,
+            args=(client, token, upstream),
+            daemon=True,
+        ).start()
+
+
+def ensure_dataimpulse_inject_proxy(username: str, password: str, host: str, port) -> str:
+    """DataImpulse용 로컬 인증 주입 HTTP 프록시 URL 반환 (없으면 기동).
+
+    Chromium은 407 없이 프록시 자격증명을 보내지 않고, DataImpulse는 407을
+    주지 않아 KR 타깃팅이 빠진다. 로컬 프록시가 CONNECT에만 인증을 주입한다.
+    """
+    global _inject_proxy_server, _inject_proxy_port, _inject_proxy_token
+    global _inject_proxy_upstream, _inject_proxy_thread
+
+    auth = _basic_proxy_auth(username, password)
+    upstream = (host, int(port))
+    with _inject_proxy_lock:
+        if (
+            _inject_proxy_server is not None
+            and _inject_proxy_port
+            and _inject_proxy_token == auth
+            and _inject_proxy_upstream == upstream
+        ):
+            return f"http://127.0.0.1:{_inject_proxy_port}"
+
+        if _inject_proxy_server is not None:
+            try:
+                _inject_proxy_server.close()
+            except OSError:
+                pass
+            _inject_proxy_server = None
+            _inject_proxy_port = None
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(64)
+        port_num = srv.getsockname()[1]
+        _inject_proxy_server = srv
+        _inject_proxy_port = port_num
+        _inject_proxy_token = auth
+        _inject_proxy_upstream = upstream
+        _inject_proxy_thread = threading.Thread(
+            target=_inject_proxy_loop,
+            args=(srv, auth, upstream),
+            daemon=True,
+        )
+        _inject_proxy_thread.start()
+        logger.info(
+            "toki31 KR 인증 주입 프록시 기동: 127.0.0.1:%s -> %s:%s",
+            port_num, host, port,
+        )
+        return f"http://127.0.0.1:{port_num}"
+
+
+def playwright_proxy_config(env: Optional[dict] = None) -> Optional[dict]:
+    """Playwright launch용 proxy 설정 (DataImpulse 단일). KR은 주입 프록시로 보장."""
+    if env is None:
+        env = _load_proxy_env()
+    user = env.get("DATAIMPULSE_USER", "")
+    password = env.get("DATAIMPULSE_PASS", "")
+    host = env.get("DATAIMPULSE_HOST", _PROXY_DEFAULT_HOST)
+    port = env.get("DATAIMPULSE_PORT", _PROXY_DEFAULT_PORT)
+    if not user or not password:
+        return None
+    if "__cr." not in user:
+        user = user + "__cr.kr"
+    server = ensure_dataimpulse_inject_proxy(user, password, host, port)
+    return {"server": server}
 
 
 def b64url_decode(s: str) -> bytes:
@@ -277,27 +446,12 @@ class Toki31Collector:
     # --- 프록시 ---
 
     def _resolve_proxy(self):
-        """프록시 설정 해석 — MaskProxy 우선, DataImpulse 백업."""
-        env = _load_proxy_env()
-        for name in _PROXY_PRIORITY:
-            prefix, default_host, default_port = _PROXY_DEFAULTS[name]
-            user = env.get(f"{prefix}_USER", "")
-            password = env.get(f"{prefix}_PASS", "")
-            host = env.get(f"{prefix}_HOST", default_host)
-            port = env.get(f"{prefix}_PORT", default_port)
-            if not user or not password:
-                continue
-            # 한국 IP targeting (DataImpulse만 지원)
-            if name == "dataimpulse" and "__cr." not in user:
-                user = user + "__cr.kr"
-            self._proxy = {
-                "server": f"http://{host}:{port}",
-                "username": user,
-                "password": password,
-            }
-            logger.info(f"toki31 프록시 선택: {name} ({host}:{port})")
-            return
-        logger.error("toki31 프록시 자격증명 없음 (.env.local)")
+        """프록시 설정 해석 — DataImpulse 단일 (MaskProxy 폴백 없음)."""
+        self._proxy = playwright_proxy_config()
+        if self._proxy:
+            logger.info(f"toki31 프록시 설정: {self._proxy.get('server')}")
+        else:
+            logger.error("toki31 프록시 자격증명 없음 — DataImpulse 자격증명 확인")
 
     @property
     def has_proxy(self) -> bool:
@@ -682,7 +836,7 @@ def fetch_chapter_content_full(
         _collector = Toki31Collector()
 
     if not _collector.has_proxy:
-        logger.error("toki31 프록시 자격증명 없음 (.env.local)")
+        logger.error("toki31 프록시 자격증명 없음 — DataImpulse 자격증명 확인")
         return None
 
     if _collector_loop is None or _collector_loop.is_closed():

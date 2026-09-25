@@ -111,18 +111,11 @@ def _toki31_cover(meta: dict) -> Optional[bytes]:
     if not main_wr_id:
         return None
 
-    from lib.toki31_playwright import _load_proxy_env, _toki_base
+    from lib.toki31_playwright import playwright_proxy_config, _toki_base
 
-    env = _load_proxy_env()
-    proxy_user = env.get("DATAIMPULSE_USER", "") or env.get("MASKPROXY_USER", "")
-    proxy_pass = env.get("DATAIMPULSE_PASS", "") or env.get("MASKPROXY_PASS", "")
-    proxy_host = env.get("DATAIMPULSE_HOST", "") or env.get("MASKPROXY_HOST", "")
-    proxy_port = env.get("DATAIMPULSE_PORT", "") or env.get("MASKPROXY_PORT", "")
-    if "dataimpulse" in proxy_host and "__cr." not in proxy_user:
-        proxy_user = proxy_user + "__cr.kr"
-    if not proxy_user or not proxy_pass:
+    proxy_cfg = playwright_proxy_config()
+    if not proxy_cfg:
         return None
-    proxy_url = "http://{}:{}".format(proxy_host, proxy_port)
     UA = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -131,10 +124,7 @@ def _toki31_cover(meta: dict) -> Optional[bytes]:
     async def _run() -> Optional[bytes]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            b = await p.chromium.launch(
-                headless=True,
-                proxy={"server": proxy_url, "username": proxy_user, "password": proxy_pass},
-            )
+            b = await p.chromium.launch(headless=True, proxy=proxy_cfg)
             c = await b.new_context(user_agent=UA, locale="ko-KR")
             pg = await c.new_page()
             await pg.goto(

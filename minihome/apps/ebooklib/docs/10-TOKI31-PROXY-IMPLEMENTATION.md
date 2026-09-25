@@ -1,9 +1,15 @@
 # toki31 본문 수집 — 한국 주거용 프록시 구현 계획
 
 > **작성일**: 2026-09-06
-> **갱신일**: 2026-09-06 (실측 검증 결과 반영)
+> **갱신일**: 2026-09-23 (MaskProxy 제거 · 제목 정규화 · API 트래픽 SSOT)
 > **목적**: toki31.com 본문 수집을 위한 한국 주거용 프록시 설정 및 구현
-> **프록시**: DataImpulse ($1/GB) + MaskProxy ($0.87/GB)
+> **프록시**: DataImpulse 단일 ($1/GB). MaskProxy 폴백은 제거됨(407).
+>
+> **2026-09-23 변경 요약**:
+> - **MaskProxy 제거**: `_PROXY_PRIORITY`/`_PROXY_DEFAULTS` 삭제, DataImpulse 단일 (§6.1)
+> - **트래픽 SSOT = DataImpulse 공식 API** (`gw.dataimpulse.com:777`, Basic Auth) — 일일 한도는 API 오늘 실측값 우선, TG×보정계수 폴백 (`docs/runbooks/dataimpulse-monitor.md`)
+> - **제목 정규화**: `_normalize_toki_title()` — `"제목 - 작가 | 사이트"` → `"제목"` (discover_toki31). 중복 디렉터리 방지
+> - KV 시크릿: `DATAIMPULSE-PROXY-KEY/API-KEY`, `MASKPROXY-PROXY-KEY/API-KEY`만 유지
 
 ## 1. 배경
 
@@ -52,32 +58,33 @@
 | 지원 프로토콜 | HTTP, HTTPS, SOCKS5 |
 | 특징 | 종량제, 트래픽 만료 없음, 국가 타기팅 포함 |
 
-### 2.2 MaskProxy
+### 2.2 MaskProxy (제거됨 — 2026-09-23)
+
+> **MaskProxy는 toki31에서 사용하지 않는다.** CONNECT 시 `407 Proxy Authentication Required`로
+> 통과 불가(toki31/일반 사이트 모두). 폴백이 실제로 무의미하고 시도만 반복되므로 로직·자격증명
+> 참조를 전부 삭제했다. KV에는 `MASKPROXY-PROXY-KEY/API-KEY`만 유지(타 용도 가능성).
 
 | 항목 | 내용 |
 |------|------|
 | URL | https://maskproxy.io |
-| 순환 레지덴셜 | $0.87/GB |
-| 데이터센터 | $0.35/GB |
-| 정적 레지덴셜 | $1.6/IP |
-| 지원 프로토콜 | HTTP, SOCKS5 |
-| 특징 | 도시/ASN 타기팅, 스티키 세션 지원 |
+| 상태 | **미사용 (toki31 407 거부)** |
 
-### 2.3 조합 전략
+### 2.3 조합 전략 (현행)
 
 ```
-Primary:   DataImpulse ($1/GB)   ← 주력 (50GB 충전분 소모, __cr.kr 한국 IP 회전)
-Fallback:  MaskProxy ($0.87/GB)  ← 폴백 (toki31 접속이 불안정해 주력에서 제외)
+DataImpulse 단일 ($1/GB)   ← __cr.kr 한국 IP 회전
 ```
 
-- **2026-09-12 변경**: DataImpulse 주력 + MaskProxy 폴백으로 전환
+- **2026-09-23**: MaskProxy 폴백 제거 → DataImpulse 단일
   - DataImpulse는 username에 `__cr.kr` 접미어 필수 (한국 IP targeting)
-  - MaskProxy는 toki31 접속 시 Page.goto 타임아웃 발생 → 폴백으로만 사용
-  - 코드: `lib/toki31_playwright.py`의 `_PROXY_PRIORITY = ("dataimpulse", "maskproxy")`
-- 중복성 확보: 주력 실패 시 폴백으로 자동 전환 (`_resolve_proxy`)
-- IP 풀 다양성: DataImpulse __cr.kr이 한국 ISP IP를 회전
+  - 코드: `lib/toki31_playwright.py`의 `playwright_proxy_config`가 DataImpulse 전용
+- 트래픽 한도 SSOT: DataImpulse 공식 API 오늘 실측값 (`docs/runbooks/dataimpulse-monitor.md`)
 
 ## 3. 아키텍처
+
+> ⚠️ **아래 §3~§4 는 초기 구현 계획의 기록(historical)**이다. 현행은 DataImpulse 단일이며
+> MaskProxy는 제거됐고, 트래픽 한도는 DataImpulse 공식 API 실측값을 SSOT로 사용한다.
+> 현행 코드: `lib/toki31_playwright.py`, `lib/dataimpulse_monitor.py`.
 
 ### 3.1 현재 구조
 
@@ -485,22 +492,19 @@ def test_toki31_chapter_with_proxy():
 > Playwright 기반 `lib/toki31_playwright.py`로 전환 후 실측 결과. (curl_cffi 설계는 이전 방식)
 
 ### 6.1 프록시 운영
-- **DataImpulse 주력** (`__cr.kr` 한국 IP 회전), **MaskProxy 폴백** (`_PROXY_PRIORITY`)
-- 자격증명: `apps/backend/.env.local` (시크릿, gitignore)
-  - `DATAIMPULSE_USER/PASS/HOST/PORT`, `MASKPROXY_USER/PASS/HOST/PORT`
+- **DataImpulse 단일** (`__cr.kr` 한국 IP 회전). **MaskProxy 폴백은 제거됨 (2026-09-23)** — toki31 통과 불가(407).
+- 자격증명: Azure Key Vault (`kv-common-prod-krc`)
+  - 시크릿: `DATAIMPULSE-API-KEY`(login), `DATAIMPULSE-PROXY-KEY` (결합형)
+  - 주입: `kv-fetch-env.py --keys DATAIMPULSE-*` → env. 서버 하드코딩 금지 (`apps/backend/.env.local`은 템플릿)
   - DataImpulse user에 `__cr.kr` 접미어 자동 부여 (`_resolve_proxy`)
-- **toki31 접근**: DataImpulse로만 성공. MaskProxy는 Page.goto 타임아웃(불안정)
+- **toki31 접근**: DataImpulse 단일. 폴백 없음.
 
-> ⚠️ **MaskProxy 폴백 이슈 (2026-09-12 확인)**
-> - 자격증명 폴백 **로직은 정상**: DataImpulse 자격증명 없으면 MaskProxy 선택됨 (단위 테스트 확인)
-> - 그러나 MaskProxy가 **HTTP 407 인증 거부** (`97038268-res:zacletal` 거부됨):
->   - TCP 1288 연결은 되지만 CONNECT 시 `407 Proxy Authentication Required`
->   - toki31/일반 사이트 모두 접속 불가 (폴백이 실제로는 무의미)
-> - 원인 추정: 서버 IP **허용목록(allowlist) 미등록** 또는 계정 미활성화/자격증명 오류
->   - 서버 공인 IP: `curl https://api.ipify.org` → 104.28.207.60 (확인 필요)
-> - **런타임 폴백 미구현**: `_resolve_proxy`는 자격증명 기준 선택뿐, DataImpulse가
->   실행 중 연결 실패해도 MaskProxy로 전환하지 않음 (추후 구현 검토)
-> - 처리: MaskProxy 계정 허용목록/자격증명 확인 후 재테스트 예정
+> ⚠️ **MaskProxy 제거 이력 (2026-09-12 확인 → 2026-09-23 제거)**
+> - MaskProxy는 **HTTP 407 인증 거부** (<REDACTED> — 값 미기재): TCP 1288 연결은 되지만
+>   CONNECT 시 `407 Proxy Authentication Required` → toki31/일반 사이트 모두 불가
+> - 원인 추정: 서버 IP 허용목록 미등록 또는 계정 미활성화/자격증명 오류
+> - 폴백이 실제로 무의미하고 시도만 반복되므로 **MaskProxy 로직·폴백·자격증명 참조 전부 삭제**
+>   (`_PROXY_PRIORITY`/`_PROXY_DEFAULTS` 제거, `playwright_proxy_config`는 DataImpulse 전용)
 
 ### 6.2 수집 실측 (화산귀환 3회차 테스트)
 - **웜 회차 평균 ~0.19MB** (콜드 ~0.75~0.94MB / 웜 184~190KB) — 50GB ≈ 27만 회차 수용

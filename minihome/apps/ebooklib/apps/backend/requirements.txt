@@ -6,3 +6,5 @@ isbnlib>=3.10,<3.12
 tenacity>=9.0.0
 requests>=2.32.0
 Pillow>=10.0.0
+playwright>=1.40.0
+cryptography>=42.0.0

@@ -75,7 +75,7 @@ class SourceConfig(BaseModel):
     delay_min_sec: int = Field(default=5, ge=1, le=86400)
     delay_max_sec: int = Field(default=300, ge=1, le=86400)
     # 프록시(유료 트래픽) 사용 여부 — True면 트래픽 가드(일일 한도) 적용.
-    # bookto31은 FlareSolverr 로컬(무료), toki31은 DataImpulse/MaskProxy(유료).
+    # bookto31은 FlareSolverr 로컬(무료), toki31은 DataImpulse(유료).
     traffic_limited: bool = False
     # bo_table(사이트 게시판) → media_type 매핑. "novel" 기본, 미정의 시 novel.
     # 예: newto31: {"fafa19": "webtoon", "novel": "novel"}
@@ -277,7 +277,7 @@ def get_delay_bounds(source: str) -> tuple[int, int]:
 def get_traffic_limited(source: str) -> bool:
     """프록시(유료 트래픽) 사용 여부 — 트래픽 가드 적용 대상인지.
 
-    toki31(DataImpulse/MaskProxy)만 True. bookto31(FlareSolverr 로컬)은 무료.
+    toki31(DataImpulse)만 True. bookto31(FlareSolverr 로컬)은 무료.
     """
     cfg = load_sources().get(source)
     return bool(cfg.traffic_limited) if cfg else False
