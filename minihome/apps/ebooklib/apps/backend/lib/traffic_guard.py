@@ -58,6 +58,7 @@ BUCKET_ANOMALY_SEVERE_PCT = 50.0         # 심각 편차(%)
 BUCKET_ANOMALY_SEVERE_CONSECUTIVE = 2    # 심각 편차 2연속 = 조기 중지
 BUCKET_ANOMALY_MIN_SAMPLES = 3           # 기준선 EWMA 최소 표본(판정 시작)
 BUCKET_ANOMALY_ALPHA = 0.2               # 기준선 EWMA 가중치
+COLD_THRESHOLD_MULTIPLIER = 5.0          # 콜드(런 첫 회차) 완화 배수 — 기준선엔 미반영
 
 # 예측(forecast) 경보 — 산업 표준(예산 예측 초과 경보) 정합
 FORECAST_MIN_ELAPSED_SEC = 3600          # 최소 경과(1h) 이전 예측은 폭주하므로 생략
@@ -345,7 +346,9 @@ def clear_calibration_emergency() -> None:
         _state_unlock(lock)
 
 
-def update_bucket_anomaly(kb_per_chapter: float, event_id: Optional[str] = None) -> dict:
+def update_bucket_anomaly(
+    kb_per_chapter: float, event_id: Optional[str] = None, cold: bool = False
+) -> dict:
     """완료된 웜 버킷의 회차당 KB를 진화 기준선(EWMA)과 비교해 소비 급증을 감시.
 
     판정(표준 정합):
@@ -377,7 +380,32 @@ def update_bucket_anomaly(kb_per_chapter: float, event_id: Optional[str] = None)
             "streak": streak,
             "alert": False,
             "stop": False,
+            "cold": cold,
         }
+
+        if cold:
+            # 콜드(런 첫 회차)는 warm 경로 활성화용 → 기준선/σ/streak에 반영하지 않고
+            # ×COLD_THRESHOLD_MULTIPLIER 완화 임계로만 로깅한다.
+            base = float(baseline) if baseline is not None else value
+            dev = ((value / base) - 1) * 100 if base > 0 else 0.0
+            thr = base * (1 + BUCKET_ANOMALY_DEV_PCT / 100) * COLD_THRESHOLD_MULTIPLIER
+            result.update(
+                {
+                    "baseline": round(base, 2),
+                    "dev_pct": round(dev, 1),
+                    "cold_exceeded": value > thr
+                    and (value - base) >= BUCKET_ANOMALY_MIN_KB,
+                }
+            )
+            if result["cold_exceeded"]:
+                logger.warning(
+                    f"⚠️ 콜드 버킷 초과({COLD_THRESHOLD_MULTIPLIER:g}x): "
+                    f"{value:.1f}KB/화 (기준선 {base:.1f}, {dev:+.1f}%)"
+                )
+            if event_id:
+                state['bucket_last_event_id'] = event_id
+                save_state(state)
+            return result
 
         if samples < BUCKET_ANOMALY_MIN_SAMPLES:
             base = float(baseline) if baseline is not None else value

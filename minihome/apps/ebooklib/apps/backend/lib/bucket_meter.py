@@ -144,6 +144,15 @@ def parse_log_lines(lines: Iterable[str]) -> list[ChapterEvent]:
 
     if cur is not None:
         chapters.append(cur)
+
+    # [WHY] 런(일자) 첫 회차는 콜드(전체 JS/문서 로드) — warm 기준선에서 제외한다.
+    # 콜드는 웜 경로를 활성화(warmup)하는 용도이므로 baseline/σ를 오염시키면 안 된다.
+    seen_days: set[str] = set()
+    for chapter in chapters:
+        day = _utc_date(chapter.started_at)
+        if day not in seen_days:
+            seen_days.add(day)
+            chapter.warm = False
     return chapters
 
 

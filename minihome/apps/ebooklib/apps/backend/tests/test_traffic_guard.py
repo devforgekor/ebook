@@ -342,3 +342,23 @@ class TestForecast:
         assert first["streak"] == 1
         assert again.get("skipped") is True
         assert tg.load_state()["bucket_anomaly_streak"] == 1
+
+
+class TestColdBuckets:
+    def test_cold_should_not_affect_baseline_or_streak(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        base_before = tg.load_state()["bucket_kb_ewma"]
+        r = tg.update_bucket_anomaly(200.0, cold=True)  # +100% < 5x 완화
+        assert r["cold_exceeded"] is False
+        assert r["streak"] == 0
+        assert tg.load_state()["bucket_kb_ewma"] == base_before
+        assert tg.is_bucket_anomaly_stop() is False
+
+    def test_cold_should_flag_above_relaxed_threshold(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        r = tg.update_bucket_anomaly(700.0, cold=True)  # +600% > 600(=100*1.2*5)
+        assert r["cold_exceeded"] is True
+        assert r["streak"] == 0
+        assert tg.is_bucket_anomaly_stop() is False

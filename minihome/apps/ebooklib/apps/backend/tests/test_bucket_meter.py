@@ -189,7 +189,9 @@ def test_should_parse_chapter_events_when_log_has_attempt_traffic_save_lines(tmp
     assert [ch.idx for ch in chapters] == [1, 2]
     assert chapters[0].bytes == 769 * 1024
     assert chapters[1].bytes == 209408
-    assert all(ch.saved and ch.warm and ch.source == "toki31" for ch in chapters)
+    assert all(ch.saved and ch.source == "toki31" for ch in chapters)
+    assert chapters[0].warm is False  # 런 첫 회차 = 콜드(태그 없어도 강제)
+    assert chapters[1].warm is True
     assert chapters[0].started_at == _ts("2026-09-23 00:03:49")
 
 
@@ -223,7 +225,7 @@ def test_should_count_failed_chapter_when_no_save_line(tmp_path):
 
     chapters = load_chapters(log)
     assert len(chapters) == 2
-    assert chapters[0].saved is False and chapters[0].warm is True
+    assert chapters[0].saved is False and chapters[0].warm is False
     assert chapters[1].warm is False
 
     facts = build_buckets(chapters, [], size=2)
@@ -457,3 +459,21 @@ def test_completed_warm_facts_should_filter_cold_late_and_partial():
     assert len(out) == 1
     assert kb_per_chapter(out[0]) == 1.0
     assert kb_per_chapter({"consumed_chapters": 0, "tg_bytes_delta": 5}) == 0.0
+
+
+def test_parse_log_lines_should_mark_first_chapter_of_each_day_cold():
+    from lib.bucket_meter import parse_log_lines
+
+    def lines(day, wr):
+        return [
+            f"{day} 10:00:00,000 [INFO] [1/1] wr_id={wr} source=toki31 시도 1/3",
+            f"{day} 10:00:05,000 [INFO]   📊 트래픽: 190.0KB [웜]",
+            f"{day} 10:00:06,000 [INFO] ✓ wr_id={wr} 저장 완료",
+        ]
+
+    log = lines("2026-09-23", "111") + lines("2026-09-23", "222") + lines("2026-09-24", "333")
+    chapters = parse_log_lines(log)
+    assert len(chapters) == 3
+    assert chapters[0].warm is False
+    assert chapters[1].warm is True
+    assert chapters[2].warm is False
