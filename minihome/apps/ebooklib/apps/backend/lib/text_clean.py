@@ -59,8 +59,9 @@ def clean_title(value: str) -> str:
     text = clean_text(value)
     if not text:
         return ""
-    # 앞머리 [사이트] / (사이트)
+    # 앞머리 [사이트] / (사이트) 및 꼬리 [독점]·[완결] 등 마케팅 표기 제거
     text = re.sub(r"^\s*[\[(]([^\])]{1,20})[\])]\s*", "", text)
+    text = re.sub(r"\s*[\[(](독점|단독|완결|무료|연재중|신작|19금|성인|BL|GL)[\])]\s*$", "", text)
     # ` - 화수` / ` N화` / ` N편` 등 회차 접미 제거
     text = re.sub(r"\s*-\s*\d{1,5}\s*(화|편|장|회)\s*$", "", text)
     # ` | 사이트` / ` - 사이트` 접미 제거

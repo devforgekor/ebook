@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.database import get_connection, init_db
 from lib.paths import MEDIA_DIRS, find_novel_dir
+from lib.text_clean import clean_author, clean_title
 
 
 def migrate_novels():
@@ -46,8 +47,8 @@ def _migrate_novel(conn: sqlite3.Connection, media_type: str, novel_dir: Path):
         with open(meta_file, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-    title = meta.get("title") or novel_id.replace("_", " ")
-    author = meta.get("author", "미상")
+    title = clean_title(meta.get("title") or novel_id.replace("_", " "))
+    author = clean_author(meta.get("author", "미상")) or "미상"
     status = meta.get("status", "연재중")
     cover_url = meta.get("coverUrl")
     description = meta.get("description", "")
@@ -55,12 +56,15 @@ def _migrate_novel(conn: sqlite3.Connection, media_type: str, novel_dir: Path):
     genre = json.dumps(meta.get("genre", []), ensure_ascii=False)
     namu_url = meta.get("namuUrl")
 
-    # 챕터 수 계산 (meta.json, 인덱스 제외)
+    # 챕터 수: 공식 총화수(meta)가 있으면 그 값을 우선, 없으면 저장된 회차 수.
+    # [WHY] 저장 회차 수는 미수집분을 반영하지 못하므로 공식 값이 정확하다.
     chapter_files = [
         f for f in novel_dir.glob("*.json")
         if f.suffix == ".json" and f.stem.isdigit()
     ]
-    total_chapters = len(chapter_files)
+    saved_count = len(chapter_files)
+    official_total = meta.get("totalChapters")
+    total_chapters = int(official_total) if official_total else saved_count
 
     # novels 테이블Upsert
     conn.execute("""

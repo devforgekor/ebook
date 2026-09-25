@@ -696,3 +696,27 @@ class TestTextClean:
         out = normalize_meta({"title": "T - 작가 | 뉴토끼", "author": "작가: A"})
         assert out["title"] == "T"
         assert out["author"] == "A"
+
+
+class TestMetadataSearch:
+    def test_title_matches_should_accept_variants_and_reject_others(self):
+        from services.metadata_search import title_matches
+
+        assert title_matches("절대회귀", "절대회귀 [독점]") is True
+        assert title_matches("절대회귀", "절대 회귀") is True
+        assert title_matches("동생이 천재였다", "동생이 천재였다 - 시하 | 뉴토끼") is True
+        assert title_matches("절대회귀", "절대귀환") is False
+        assert title_matches("절대회귀", "무관한 소설") is False
+        assert title_matches("", "anything") is False
+
+    def test_naver_parse_should_extract_total_and_author_from_description(self):
+        from services.metadata_official import parse_platform
+
+        html = (
+            '<meta property="og:title" content="절대회귀 [독점]">'
+            '<meta property="og:description" content="896 화 연재중, #NOVEL, 작가: 장영훈">'
+        )
+        out = parse_platform("naver", html, "https://series.naver.com/x")
+        assert out["total_chapters"] == 896
+        assert out["author"] == "장영훈"
+        assert out["status"] == "연재중"

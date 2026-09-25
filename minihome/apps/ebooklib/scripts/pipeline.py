@@ -1617,38 +1617,56 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
 
         log.info(f"enrich 시도: {novel_dir.name}")
 
-        # 1순위: 사용자가 준 **공식 플랫폼 URL**(문피아/조아라/네이버)에서만 메타 조회
-        # (정확한 정본 데이터 — 임의 검색/추측 금지)
+        # 0순위: 공식 URL이 없으면 **제목으로 공식 플랫폼 검색**(네이버 시리즈 우선)
         official_url = meta.get('meta_source_url') or meta.get('official_url') or ""
         official_meta = None
-        if official_url:
+        if not official_url:
+            try:
+                from services.metadata_search import find_official
+
+                found = find_official(meta.get('title', novel_dir.name))
+                if found and found.get('source_url'):
+                    official_url = found['source_url']
+                    official_meta = found
+                    log.info(
+                        f"  ✓ {novel_dir.name}: 제목 검색으로 공식 URL 확보 ({found.get('source')})"
+                    )
+            except Exception as e:
+                log.debug(f"공식 검색 실패({novel_dir.name}): {e}")
+
+        # 1순위: 사용자가 준 **공식 플랫폼 URL**(문피아/조아라/네이버)에서만 메타 조회
+        # (정확한 정본 데이터 — 임의 검색/추측 금지)
+        if official_url and official_meta is None:
             try:
                 from services.metadata_official import get_metadata_from_url
 
                 official_meta = get_metadata_from_url(official_url)
-                if official_meta:
-                    from lib.storage import update_meta_from_official
-
-                    # 표지: 공식 작품 페이지 이미지가 가장 정확 → 로컬 저장 우선
-                    try:
-                        from services.metadata_official import cover_save_path, download_cover
-
-                        if official_meta.get("cover_url"):
-                            dest = cover_save_path(novel_dir.name)
-                            if download_cover(official_meta["cover_url"], dest):
-                                official_meta["cover_url"] = f"/api/covers/{dest.name}"
-                    except Exception as e:
-                        log.debug(f"공식 표지 저장 실패(URL 유지): {e}")
-
-                    update_meta_from_official(novel_dir.name, official_meta, media_type=meta.get('media_type'))
-                    results['enriched'] += 1
-                    log.info(
-                        f"  ✓ {novel_dir.name}: 공식({official_meta.get('source')}) "
-                        f"작가={official_meta.get('author','?')} 총화={official_meta.get('total_chapters')}"
-                    )
             except Exception as e:
                 results['errors'] += 1
                 log.warning(f"  ✗ {novel_dir.name}: 공식 메타 실패 {e}")
+
+        if official_meta is not None:
+            from lib.storage import update_meta_from_official
+
+            # 표지: 공식 작품 페이지 이미지가 가장 정확 → 로컬 저장 우선
+            try:
+                from services.metadata_official import cover_save_path, download_cover
+
+                if official_meta.get("cover_url"):
+                    dest = cover_save_path(novel_dir.name)
+                    if download_cover(official_meta["cover_url"], dest):
+                        official_meta["cover_url"] = f"/api/covers/{dest.name}"
+            except Exception as e:
+                log.debug(f"공식 표지 저장 실패(URL 유지): {e}")
+
+            if not official_meta.get("source_url"):
+                official_meta["source_url"] = official_url
+            update_meta_from_official(novel_dir.name, official_meta, media_type=meta.get('media_type'))
+            results['enriched'] += 1
+            log.info(
+                f"  ✓ {novel_dir.name}: 공식({official_meta.get('source')}) "
+                f"작가={official_meta.get('author','?')} 총화={official_meta.get('total_chapters')}"
+            )
 
         # 2순위: 공식 URL이 없을 때만 namu.wiki로 보강(추측 아님 — 위키 근거)
         if official_meta is None:

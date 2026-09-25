@@ -131,6 +131,14 @@ def parse_platform(platform: str, html_text: str, url: str = "") -> dict:
 
     # 네이버: JSON-LD Book이 가장 정확
     if platform == "naver":
+        # og:description 예: "896 화 연재중, #NOVEL, #무협, ..., 작가: 장영훈"
+        desc = out["description"] or ""
+        m = re.search(r"(\d{1,5})\s*화", desc)
+        if m:
+            out["total_chapters"] = int(m.group(1))
+        am = re.search(r"작가\s*[:：]\s*([^,]+)", desc)
+        if am and not out["author"]:
+            out["author"] = am.group(1).strip()
         for m in re.finditer(
             r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             html_text,
