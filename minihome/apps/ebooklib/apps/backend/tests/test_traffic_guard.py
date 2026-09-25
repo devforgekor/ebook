@@ -863,3 +863,56 @@ class TestKakaoMediaPreference:
             else: _s.modules["requests"] = real
         assert out["source_url"].endswith("/2")
         assert out["total_chapters"] == 1527
+
+
+class TestDerivativeFilter:
+    def test_is_derivative_should_flag_fanfic_and_subtitles(self):
+        from services.metadata_search import is_derivative
+
+        assert is_derivative("화산귀환: 매화당립") is True
+        assert is_derivative("화산귀환 시즌2") is True
+        assert is_derivative("작품 외전") is True
+        assert is_derivative("아무제목", ["팬픽·패러디", "무협"]) is True
+        assert is_derivative("절대회귀 [독점]") is False
+        assert is_derivative("화산귀환") is False
+
+    def test_title_matches_should_reject_derivative(self):
+        from services.metadata_search import title_matches
+
+        assert title_matches("화산귀환", "화산귀환: 매화당립") is False
+        assert title_matches("화산귀환", "화산귀환") is True
+        assert title_matches("절대회귀", "절대회귀 [독점]") is True
+
+    def test_authors_conflict(self):
+        from services.metadata_search import _authors_conflict
+
+        assert _authors_conflict("비가", "르믈로무") is True
+        assert _authors_conflict("화기연,아진,현임", "현임") is False
+        assert _authors_conflict("시하", "시하") is False
+        assert _authors_conflict("", "누구") is False
+
+    def test_find_official_should_discard_author_conflict(self):
+        from services import metadata_search as ms
+
+        calls = {"n": 0}
+
+        def fake_naver(t):
+            return {"title": t, "author": "비가", "total_chapters": 1974, "source": "official:naver"}
+
+        def fake_munpia(t):
+            calls["n"] += 1
+            return {"title": t + ": 매화당립", "author": "르믈로무", "source": "official:munpia"}
+
+        def fake_kakao(t, want_media=None):
+            return None
+
+        import sys as _s
+        orig = (ms.search_naver, ms.search_munpia, ms.search_kakao)
+        ms.search_naver, ms.search_munpia, ms.search_kakao = fake_naver, fake_munpia, fake_kakao
+        try:
+            out = ms.find_official("화산귀환")
+        finally:
+            ms.search_naver, ms.search_munpia, ms.search_kakao = orig
+        assert out["source"] == "official:naver"
+        assert out["author"] == "비가"
+        assert calls["n"] == 1  # 하위 소스는 조회되지만 폐기됨

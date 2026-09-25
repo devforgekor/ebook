@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Optional, Sequence
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -48,16 +48,49 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s\-_·:：|]", "", clean_title(s or "")).lower()
 
 
+# 파생작(스핀오프/팬픽/시즌/리메이크 등) 판별 — 플랫폼 태그 또는 부제 토큰.
+# [WHY] '화산귀환: 매화당립'(팬픽·패러디)처럼 원작과 다른 작품이 제목 일치로
+# 오매칭되는 것을 막는다. 부제 구분자·파생 키워드가 있으면 원작으로 보지 않는다.
+_DERIVATIVE_TOKENS = (
+    "스핀오프", "외전", "시즌", "리메이크", "리부트", "팬픽", "팬픽션", "패러디",
+    "2차창작", "二次", "after", "if", "au", "리턴즈", "returns",
+)
+_DERIVATIVE_GENRES = ("팬픽", "패러디", "2차창작", "fanfic", "crossover")
+_SUBTITLE_SEP = re.compile(r"[:：]|(?:\s[-–—]\s)|[\[(]|\s[|｜]\s")
+
+
+def is_derivative(title: str, genre: Optional[Sequence[str]] = None, sub_genre: str = "") -> bool:
+    """파생작(스핀오프/팬픽/시즌 등) 여부 — 원작 매칭에서 제외하기 위함.
+
+    - 플랫폼 장르/서브장르에 팬픽·패러디 표기가 있으면 True
+    - 부제 구분자(:/-/[/()/|) 뒤 토큰에 시즌·외전·팬픽 등이 있으면 True
+    """
+    genres = " ".join([*(genre or []), sub_genre or ""]).lower()
+    if any(g in genres for g in _DERIVATIVE_GENRES):
+        return True
+    from lib.text_clean import clean_title
+
+    # clean_title이 [독점]·[완결] 등 마케팅 꼬리표를 제거하므로, 그 결과로 판정한다.
+    text = clean_title(title or "").lower()
+    if any(tok in text for tok in _DERIVATIVE_TOKENS):
+        return True
+    return bool(_SUBTITLE_SEP.search(text))
+
+
 def title_matches(query: str, candidate: str) -> bool:
     """검색어와 후보 제목의 일치 판정(오매칭 방지).
 
-    - 정규화 후 완전 일치, 또는 후보가 검색어를 포함(길이 차 ≤ 6)할 때만 True.
+    - 정규화 후 완전 일치 → True
+    - 후보가 파생작(부제/키워드)이면 → **정확 일치가 아닌 한** False
+    - 그 외 부분 포함은 길이 차 ≤ 6일 때만 True
     """
     q, c = _norm(query), _norm(candidate)
     if not q or not c:
         return False
     if q == c:
         return True
+    if is_derivative(candidate):
+        return False
     return (q in c or c in q) and abs(len(q) - len(c)) <= 6
 
 
@@ -130,6 +163,9 @@ def search_munpia(title: str, timeout: float = 12.0) -> Optional[dict]:
         return None
     for it in items:
         if not title_matches(title, it.get("title", "")):
+            continue
+        if is_derivative(it.get("title", ""), [it.get("mainGenre"), it.get("subGenre")]):
+            logger.debug(f"파생작 제외(munpia): {it.get('title')} / {it.get('mainGenre')}")
             continue
         novel_id = it.get("novelId")
         return {
@@ -232,6 +268,9 @@ def search_kakao(title: str, timeout: float = 15.0, want_media: Optional[str] = 
     if want_media == "novel":
         matches.sort(key=lambda it: 0 if (it.get("category") == "웹소설") else 1)
     for it in matches:
+        if is_derivative(it.get("title", ""), [it.get("category"), it.get("sub_category")]):
+            logger.debug(f"파생작 제외(kakao): {it.get('title')} / {it.get('sub_category')}")
+            continue
         sid = it.get("series_id")
         total = None
         prod = _kakao_get(KAKAO_PRODUCT_API, {"series_id": sid, "page": 0, "size": 1}, timeout)
@@ -257,24 +296,45 @@ def search_kakao(title: str, timeout: float = 15.0, want_media: Optional[str] = 
     return None
 
 
-def find_official(title: str, want_media: Optional[str] = None) -> Optional[dict]:
-    """제목으로 공식 메타 검색 — 네이버 시리즈 → 문피아 → 카카오 → (접근 가능 시) 기타.
+def _authors_conflict(a: str, b: str) -> bool:
+    """두 작가 표기가 서로 다른 사람인지(정규화 후 완전 불일치) 판정.
 
-    Returns: metadata_official.parse_platform 형태의 dict 또는 None.
+    다중 작가(콤마)는 구성원 집합이 겹치면 같은 작품으로 본다.
     """
-    # 1차: 네이버 시리즈(HTTP 접근 가능, 파싱 검증됨)
-    meta = search_naver(title)
-    if meta:
-        return meta
-    # 2차: 문피아(검색 API JSON — 작가·총화수·완결 정확)
+    from lib.text_clean import clean_author
+
+    def parts(x: str) -> set:
+        return {p.strip() for p in re.split(r"[,/·]", clean_author(x or "")) if p.strip()}
+
+    pa, pb = parts(a), parts(b)
+    if not pa or not pb:
+        return False  # 한쪽이 비면 판단 보류(폐기하지 않음)
+    return not (pa & pb)
+
+
+def find_official(title: str, want_media: Optional[str] = None) -> Optional[dict]:
+    """제목으로 공식 메타 검색 — 네이버 → 문피아 → 카카오 (작가 교차검증).
+
+    1차 결과(네이버)의 작가를 기준으로, 하위 소스 결과가 **작가 불일치**면 폐기한다
+    (스핀오프/동명이작 오매칭 방지). 상위 결과가 없으면 하위를 그대로 채택한다.
+    """
+    primary = search_naver(title)
+    if primary:
+        ref_author = primary.get("author", "")
+        for lower in (search_munpia(title), search_kakao(title, want_media=want_media)):
+            if lower and _authors_conflict(ref_author, lower.get("author", "")):
+                logger.debug(
+                    f"작가 불일치로 폐기: {lower.get('source')} "
+                    f"({lower.get('author')} != {ref_author})"
+                )
+        return primary
+    # 네이버 실패 → 문피아 → 카카오
     meta = search_munpia(title)
     if meta:
         return meta
-    # 3차: 카카오페이지(BFF API — Playwright 폴백 필요할 수 있음)
     meta = search_kakao(title, want_media=want_media)
     if meta:
         return meta
-    # 4차: 리디/조아라는 접근 차단이 잦아 시도만 하고 스킵
     for platform in ("ridi", "joara"):
         tmpl, _ = _SEARCH_ENDPOINTS[platform]
         if not _fetch(tmpl.format(q=quote(title))):
