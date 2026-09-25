@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Status: new
+# Status: production
 # Path: ebooklib/apps/backend/lib/toki31_playwright.py
 """toki31 Playwright 콘텐츠 추출기.
 
@@ -83,6 +83,47 @@ _RESET_AFTER_CONSECUTIVE_FAILURES = 3
 _NOVEL_CONTENT_MAX_BYTES = int(float(os.getenv('TOKI31_CONTENT_MAX_KB', '60'))) * 1024
 _CHAPTER_COLD_MAX_BYTES = int(float(os.getenv('TOKI31_CHAPTER_COLD_MAX_MB', '1.5')) * 1024 * 1024)
 _CHAPTER_WARM_MAX_BYTES = int(float(os.getenv('TOKI31_CHAPTER_WARM_MAX_MB', '0.8')) * 1024 * 1024)
+
+
+# ── 레벨1 절감(A/B 토글) — TRAFFIC_OPTIMIZATION_GUIDE.md §4 ─────────────
+# 각 레버는 env로 끄고 켤 수 있어 단계별 A/B/롤백이 가능하다(기본 ON).
+_LAUNCH_TUNING_ENV = "EBOOK_TOK31_LAUNCH_TUNING"
+_MIN_HEADERS_ENV = "EBOOK_TOK31_MIN_HEADERS"
+
+CHROMIUM_TUNING_ARGS = (
+    "--dns-prefetch-disable",
+    "--disable-prefetch",
+    "--no-referrers",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
+)
+
+# 요청 헤더 최소화 — 허용 헤더만 좁힌다(압축은 gzip/deflate/br/zstd 유지).
+# Sec-Fetch/Sec-CH/DNT/Referer는 브라우저가 자동 부착하므로 여기서 제거하지 않는다.
+MINIMAL_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def _env_on(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _chromium_args() -> list:
+    return list(CHROMIUM_TUNING_ARGS) if _env_on(_LAUNCH_TUNING_ENV) else []
+
+
+def _request_headers() -> dict:
+    return dict(MINIMAL_REQUEST_HEADERS) if _env_on(_MIN_HEADERS_ENV) else {}
 
 
 def _parse_proxy_key(value: str):
@@ -467,7 +508,7 @@ class Toki31Collector:
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
-        launch_kwargs = {"headless": True}
+        launch_kwargs = {"headless": True, "args": _chromium_args()}
         if self._proxy:
             launch_kwargs["proxy"] = self._proxy
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
@@ -477,6 +518,9 @@ class Toki31Collector:
             viewport={"width": 1920, "height": 1080},
             locale="ko-KR",
         )
+        _headers = _request_headers()
+        if _headers:
+            await self._context.set_extra_http_headers(_headers)
         self._page = await self._context.new_page()
 
         # novel-content API 응답 리스너 (브라우저 수명 동안 1회만 등록)

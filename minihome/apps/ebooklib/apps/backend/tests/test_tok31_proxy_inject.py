@@ -13,8 +13,12 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from lib.toki31_playwright import (
+    CHROMIUM_TUNING_ARGS,
+    MINIMAL_REQUEST_HEADERS,
     _basic_proxy_auth,
+    _chromium_args,
     _inject_proxy_auth,
+    _request_headers,
     ensure_dataimpulse_inject_proxy,
     playwright_proxy_config,
 )
@@ -148,3 +152,21 @@ class TestInjectProxyRuntime:
         assert b"Proxy-Authorization: Basic " in head
         expected_user = base64.b64encode(b"user__cr.kr:pass").decode()
         assert expected_user.encode() in head
+
+
+class TestLevel1Tuning:
+    def test_should_enable_launch_args_by_default(self, monkeypatch):
+        monkeypatch.delenv("EBOOK_TOK31_LAUNCH_TUNING", raising=False)
+        assert _chromium_args() == list(CHROMIUM_TUNING_ARGS)
+
+    def test_should_disable_launch_args_when_off(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_TOK31_LAUNCH_TUNING", "0")
+        assert _chromium_args() == []
+
+    def test_should_enable_min_headers_by_default(self, monkeypatch):
+        monkeypatch.delenv("EBOOK_TOK31_MIN_HEADERS", raising=False)
+        assert _request_headers() == MINIMAL_REQUEST_HEADERS
+
+    def test_should_disable_min_headers_when_off(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_TOK31_MIN_HEADERS", "off")
+        assert _request_headers() == {}
