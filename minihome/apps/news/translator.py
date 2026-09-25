@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Status: production
 # Path: collector.py
-"""Translate English articles to Korean — OpenRouter API with retry & fallback."""
+"""Translate English articles to Korean — OpenRouter RR proxy with retry."""
 
 import json
 import os
@@ -61,49 +61,10 @@ _PROXY_MODELS = [
 ]
 _proxy_model_idx = 0  # 모델 라운드로빈 시작 인덱스
 
-# Gemini 폴백 — OpenRouter free tier가 429/한도 소진일 때 내부 Gemini OpenAI
-# 프록시(gemini-openai-proxy.service, :4431)로 번역한다. 무료·안정적.
-_GEMINI_PROXY_URL = os.environ.get("GEMINI_OPENAI_PROXY_URL", "http://127.0.0.1:4431")
-_GEMINI_MODEL = os.environ.get("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash")
-
-
-def _call_gemini(prompt: str, retries: int = 2) -> str:
-    """Call local Gemini OpenAI-compatible proxy. Returns content or empty."""
-    payload = json.dumps({
-        "model": _GEMINI_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": 3000,
-    }).encode()
-    req = urllib.request.Request(
-        f"{_GEMINI_PROXY_URL}/v1/chat/completions", data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    for attempt in range(1, retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                return content or ""
-        except urllib.error.HTTPError as e:
-            if e.code == 503 and attempt < retries:
-                time.sleep(3 * attempt)
-                continue
-            print(f"  [WARN] Gemini proxy failed: HTTP {e.code}")
-            return ""
-        except Exception as e:
-            if attempt < retries:
-                time.sleep(2 * attempt)
-                continue
-            print(f"  [WARN] Gemini proxy failed: {e}")
-            return ""
-    return ""
-
 
 def _call_openrouter(prompt: str, model: str = None, retries: int = 3) -> str:
     """OpenRouter RR 프록시 경유 (키 라운드로빈) + 유료 모델 라운드로빈.
 
-    프록시/모델 전부 실패 시 Gemini 프록시로 폴백한다.
     Returns response content on success, empty string on failure.
     """
     global _proxy_model_idx
@@ -145,8 +106,8 @@ def _call_openrouter(prompt: str, model: str = None, retries: int = 3) -> str:
                     time.sleep(2 * (attempt + 1))
                     continue
                 break
-    # 프록시 모든 모델 실패 → Gemini 폴백
-    return _call_gemini(prompt)
+    # All proxy models failed — no fallback (gemini proxy retired 2026-09-22)
+    return ""
 
 
 _TRANSLATE_PROMPT = """You are a professional news translator and summarizer. Translate the following English news article to Korean.
