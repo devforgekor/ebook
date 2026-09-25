@@ -615,7 +615,7 @@ def test_daily_reconcile_should_compute_gap_and_quality():
         },
         {
             "to_ts": ts,
-            "quality": "partial",
+            "quality": "ok",
             "api_mb_delta": 5.0,
             "tg_bytes_delta": 3 * 1024 * 1024,
         },
@@ -633,5 +633,24 @@ def test_daily_reconcile_should_compute_gap_and_quality():
     assert out["gap_mb"] == 5.0
     assert out["tg_mb"] == 19.0
     assert out["n_facts"] == 2
-    assert out["ok_count"] == 1 and out["partial_count"] == 1
+    assert out["ok_count"] == 2 and out["partial_count"] == 0
+    assert out["rollup_coverage"] == 1.0
     assert out["api_settled"] is True
+
+
+def test_daily_reconcile_should_suppress_gap_when_unsettled():
+    from datetime import datetime, timezone
+
+    from lib.bucket_meter import daily_reconcile
+
+    ts = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc).timestamp()
+    facts = [
+        {"to_ts": ts, "quality": "late", "api_mb_delta": 0.0, "tg_bytes_delta": 16 * 1024 * 1024},
+        {"to_ts": ts, "quality": "late", "api_mb_delta": 0.0, "tg_bytes_delta": 8 * 1024 * 1024},
+    ]
+    history = [{"group_date": "2026-09-23T00:00:00Z", "total_traffic": 40 * 1024 * 1024}]
+    out = daily_reconcile(facts, history, "2026-09-23")
+    assert out["api_billed_mb"] == 40.0
+    assert out["rollup_coverage"] == 0.0
+    assert out["gap_pct"] is None
+    assert out["gap_mb"] is None

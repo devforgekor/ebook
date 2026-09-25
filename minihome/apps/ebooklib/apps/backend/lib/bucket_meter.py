@@ -34,6 +34,7 @@ DEFAULT_BUCKET_SIZE = 30
 
 # [WHY] Prometheus raw 기본 15d + Influx 'raw는 짧게/요약은 길게' 패턴 (plan §14.2)
 API_RAW_RETENTION_DAYS = 15
+MIN_RECONCILE_COVERAGE = 0.8  # gap 판정에 필요한 settle(ok) 버킷 비율
 
 WATCHER_DIR = Path("/opt/ai_data/flaresolverr/ebook_watcher")
 DEFAULT_LOG_PATH = WATCHER_DIR / "collect_toki31.log"
@@ -540,16 +541,24 @@ def daily_reconcile(
             break
     rollup = sum(float(f.get("api_mb_delta") or 0) for f in day_facts)
     tg_mb = sum(int(f.get("tg_bytes_delta") or 0) for f in day_facts) / _MB
+    ok_count = sum(1 for f in day_facts if f.get("quality") == QUALITY_OK)
+    coverage = ok_count / len(day_facts) if day_facts else 0.0
+    # [WHY] API settle 전(quality=late) 버킷은 api_mb_delta=0 → rollup 과소로 gap이
+    # 100%로 보인다(오탐). coverage가 충분할 때만 gap을 산출한다.
+    settled_enough = api_billed > 0 and coverage >= MIN_RECONCILE_COVERAGE
     return {
         "day": day,
         "api_billed_mb": round(api_billed, 3),
         "rollup_api_mb": round(rollup, 3),
+        "rollup_coverage": round(coverage, 2),
         "tg_mb": round(tg_mb, 3),
         "r_day": round(api_billed / tg_mb, 4) if (tg_mb > 0 and api_billed > 0) else None,
-        "gap_mb": round(api_billed - rollup, 3),
-        "gap_pct": round((api_billed - rollup) / api_billed * 100, 1) if api_billed > 0 else None,
+        "gap_mb": round(api_billed - rollup, 3) if settled_enough else None,
+        "gap_pct": round((api_billed - rollup) / api_billed * 100, 1)
+        if settled_enough
+        else None,
         "n_facts": len(day_facts),
-        "ok_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_OK),
+        "ok_count": ok_count,
         "late_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_LATE),
         "partial_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_PARTIAL),
         "api_settled": api_billed > 0,
