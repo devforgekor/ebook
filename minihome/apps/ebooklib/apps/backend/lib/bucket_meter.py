@@ -433,26 +433,49 @@ def bucket_ratio(fact: dict) -> float | None:
     return fact.get("r")
 
 
+def _metric_value(fact: dict, metric: str) -> float | None:
+    chapters = fact.get("consumed_chapters") or 0
+    if metric == "api_kb_per_chapter":
+        if fact.get("quality") == QUALITY_OK and fact.get("api_mb_delta") and chapters:
+            return fact["api_mb_delta"] * _KB / chapters
+    elif metric == "tg_kb_per_chapter":
+        if chapters and fact["tg_bytes_delta"] > 0:
+            return fact["tg_bytes_delta"] / _KB / chapters
+    elif metric == "r" and fact.get("r"):
+        return fact["r"]
+    return None
+
+
+def _ordered_ok_values(facts: Sequence[dict], metric: str) -> list[float]:
+    series = [f for f in facts if f.get("quality") == QUALITY_OK and f.get("consumed_chapters")]
+    series.sort(key=lambda f: f.get("from_ts") or 0)
+    return [v for f in series if (v := _metric_value(f, metric)) is not None]
+
+
+def cuped_median(values: Sequence[float]) -> float | None:
+    """lag-1 공변량 CUPED 근사 중앙값 — 사전값(X=직전 관측)으로 분산을 줄인다.
+
+    [WHY] 시간순 버킷은 자기상관이 있어 단순 차분은 분산을 과소평가한다(switchback
+    주의). CUPED(θ= Cov(X,Y)/Var(X))로 조정해 A/B 민감도를 높인다(Microsoft/Netflix 표준).
+    """
+    if len(values) < 3:
+        return round(median(values), 4) if values else None
+    xs, ys = list(values[:-1]), list(values[1:])
+    mx, my = mean(xs), mean(ys)
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    var = sum((x - mx) ** 2 for x in xs)
+    theta = cov / var if var > 0 else 0.0
+    adjusted = [y - theta * (x - mx) for x, y in zip(xs, ys)]
+    return round(median(adjusted), 4) if adjusted else None
+
+
 def facts_by_config(facts: Sequence[dict], config_hash: str) -> list[dict]:
     """특정 config_hash로 태깅된 팩트만."""
     return [f for f in facts if f.get("config_hash") == config_hash]
 
 
 def _metric_median(facts: Sequence[dict], metric: str) -> float | None:
-    vals: list[float] = []
-    for f in facts:
-        chapters = f.get("consumed_chapters") or 0
-        if (
-            metric == "api_kb_per_chapter"
-            and f.get("quality") == QUALITY_OK
-            and f.get("api_mb_delta")
-            and chapters
-        ):
-            vals.append(f["api_mb_delta"] * _KB / chapters)
-        elif metric == "tg_kb_per_chapter" and chapters and f["tg_bytes_delta"] > 0:
-            vals.append(f["tg_bytes_delta"] / _KB / chapters)
-        elif metric == "r" and f.get("r"):
-            vals.append(f["r"])
+    vals = [v for f in facts if (v := _metric_value(f, metric)) is not None]
     return round(median(vals), 4) if vals else None
 
 
@@ -473,20 +496,39 @@ def compare_configs(
     baseline_hash: str,
     treatment_hash: str,
     metric: str = "api_kb_per_chapter",
+    *,
+    min_buckets: int = 5,
+    noise_floor_pct: float = 0.0,
+    cuped: bool = False,
 ) -> dict:
     """baseline/treatment 두 config의 OEC 비교 — 절감률/판정(계획 §6).
 
-    감소율 = (baseline - treatment)/baseline × 100. ≥10% 다음 단계, ≥5% 채택, <5% 롤백.
+    감소율 = (baseline - treatment)/baseline × 100.
+    - `min_buckets`: 사전 선언 표본(미달 시 판정 보류 = peeking 편향 방지).
+    - `noise_floor_pct`: A/A 관측 변동성 — 이보다 작은 감소는 채택하지 않음.
+    - `cuped`: lag-1 공변량 조정으로 분산 축소(자기상관 완화).
+    판정: ≥max(10,noise) 다음 단계, ≥max(5,noise) 채택, 그 외 롤백.
     """
-    base = _group_stats(facts_by_config(facts, baseline_hash))
-    treat = _group_stats(facts_by_config(facts, treatment_hash))
-    b, t = base.get(f"{metric}_median"), treat.get(f"{metric}_median")
+    base_facts = facts_by_config(facts, baseline_hash)
+    treat_facts = facts_by_config(facts, treatment_hash)
+    if cuped:
+        b = cuped_median(_ordered_ok_values(base_facts, metric))
+        t = cuped_median(_ordered_ok_values(treat_facts, metric))
+    else:
+        b = _metric_median(base_facts, metric)
+        t = _metric_median(treat_facts, metric)
+    base = _group_stats(base_facts)
+    treat = _group_stats(treat_facts)
     delta = round((t - b) / b * 100, 1) if (b and t and b > 0) else None
-    if delta is None:
+    if (
+        delta is None
+        or base["n_ok"] < min_buckets
+        or treat["n_ok"] < min_buckets
+    ):
         verdict = "insufficient"
-    elif -delta >= 10:
+    elif -delta >= max(10.0, noise_floor_pct):
         verdict = "adopt_next"
-    elif -delta >= 5:
+    elif -delta >= max(5.0, noise_floor_pct):
         verdict = "adopt"
     else:
         verdict = "rollback"
@@ -497,6 +539,9 @@ def compare_configs(
         "delta_pct": delta,
         "reduction_pct": round(-delta, 1) if delta is not None else None,
         "verdict": verdict,
+        "min_buckets": min_buckets,
+        "noise_floor_pct": noise_floor_pct,
+        "cuped": cuped,
     }
 
 

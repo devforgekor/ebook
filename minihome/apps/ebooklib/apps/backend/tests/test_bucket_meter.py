@@ -575,16 +575,16 @@ def test_compare_configs_should_report_reduction_and_verdict():
     from lib.bucket_meter import compare_configs
 
     facts = [_ok_fact("base", 100.0), _ok_fact("treat", 90.0)]
-    out = compare_configs(facts, "base", "treat")
+    out = compare_configs(facts, "base", "treat", min_buckets=1)
     assert out["delta_pct"] == -10.0
     assert out["reduction_pct"] == 10.0
     assert out["verdict"] == "adopt_next"
 
     facts = [_ok_fact("base", 100.0), _ok_fact("treat", 97.0)]
-    assert compare_configs(facts, "base", "treat")["verdict"] == "rollback"
+    assert compare_configs(facts, "base", "treat", min_buckets=1)["verdict"] == "rollback"
 
     facts = [_ok_fact("base", 100.0), _ok_fact("treat", 105.0)]
-    assert compare_configs(facts, "base", "treat")["verdict"] == "rollback"
+    assert compare_configs(facts, "base", "treat", min_buckets=1)["verdict"] == "rollback"
 
 
 def test_aa_report_should_flag_variance_over_threshold():
@@ -654,3 +654,49 @@ def test_daily_reconcile_should_suppress_gap_when_unsettled():
     assert out["rollup_coverage"] == 0.0
     assert out["gap_pct"] is None
     assert out["gap_mb"] is None
+
+
+def test_compare_configs_should_hold_verdict_below_min_buckets():
+    from lib.bucket_meter import compare_configs
+
+    facts = [_ok_fact("base", 100.0), _ok_fact("treat", 90.0)]
+    out = compare_configs(facts, "base", "treat", min_buckets=2)
+    assert out["delta_pct"] == -10.0
+    assert out["verdict"] == "insufficient"
+
+
+def test_compare_configs_should_respect_noise_floor():
+    from lib.bucket_meter import compare_configs
+
+    facts = [_ok_fact("base", 100.0), _ok_fact("treat", 94.0)]  # -6%
+    assert compare_configs(facts, "base", "treat", min_buckets=1)["verdict"] == "adopt"
+    out = compare_configs(
+        facts, "base", "treat", min_buckets=1, noise_floor_pct=7.0
+    )
+    assert out["verdict"] == "rollback"
+
+
+def test_compare_configs_should_support_cuped():
+    from lib.bucket_meter import compare_configs
+
+    base = [
+        _ok_fact("b", 100.0, from_ts=1.0),
+        _ok_fact("b", 100.0, from_ts=2.0),
+        _ok_fact("b", 100.0, from_ts=3.0),
+    ]
+    treat = [
+        _ok_fact("t", 90.0, from_ts=1.0),
+        _ok_fact("t", 90.0, from_ts=2.0),
+        _ok_fact("t", 90.0, from_ts=3.0),
+    ]
+    out = compare_configs(base + treat, "b", "t", min_buckets=1, cuped=True)
+    assert out["cuped"] is True
+    assert out["delta_pct"] == -10.0
+
+
+def test_cuped_median_edge_cases():
+    from lib.bucket_meter import cuped_median
+
+    assert cuped_median([]) is None
+    assert cuped_median([100.0]) == 100.0
+    assert cuped_median([100.0, 110.0, 120.0]) is not None
