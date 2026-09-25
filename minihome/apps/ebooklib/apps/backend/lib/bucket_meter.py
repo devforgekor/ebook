@@ -432,6 +432,25 @@ def bucket_ratio(fact: dict) -> float | None:
     return fact.get("r")
 
 
+def load_facts(path: str | Path = DEFAULT_OUT_PATH) -> list[dict]:
+    """append-only fact JSONL 로드(손상 라인은 건너뜀)."""
+    target = Path(path)
+    if not target.exists():
+        return []
+    facts: list[dict] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            facts.append(row)
+    return facts
+
+
 def report(facts: Sequence[dict]) -> dict:
     """버킷 팩트 목록 요약 — 품질 분포와 대표 지표."""
     ok_facts = [f for f in facts if f["quality"] == QUALITY_OK and f["r"] is not None]

@@ -92,6 +92,35 @@ def _sd_notify(state: str = "") -> None:
         pass  # watchdog 신호 실패는 치명적이지 않음
 
 
+def _traffic_status(include_buckets: bool = False) -> dict:
+    """status.json용 트래픽 요약 — 이중 캡/단계·리소스 유형·(선택) 버킷 요약."""
+    out: dict = {}
+    try:
+        from lib.traffic_guard import summary_calibrated
+
+        out["summary"] = summary_calibrated()
+    except Exception as e:
+        out["summary_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from lib.toki31_playwright import get_collector_state
+
+        cs = get_collector_state()
+        out["traffic_by_type"] = cs.get("traffic_by_type", {})
+        out["encoding_counts"] = cs.get("encoding_counts", {})
+    except Exception:
+        pass
+    if include_buckets:
+        try:
+            from lib.bucket_meter import DEFAULT_OUT_PATH, load_facts, report
+
+            facts = load_facts(DEFAULT_OUT_PATH)
+            if facts:
+                out["buckets"] = report(facts)
+        except Exception as e:
+            out["buckets_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
 def _write_status(data: dict) -> None:
     """진행 상황을 status.json에 기록 (loop/collect가 주기적으로 호출).
 
@@ -2507,6 +2536,7 @@ def main():
                 except Exception:
                     prev_status = {}
                 prev_status.update({"phase": "loop", "cycle": cycle, "source": source or "all"})
+                prev_status["traffic"] = _traffic_status(include_buckets=(cycle % 60 == 1))
                 _write_status(prev_status)
                 # systemd watchdog 신호 (WatchdogSec 대응)
                 _sd_notify(f"cycle {cycle}")

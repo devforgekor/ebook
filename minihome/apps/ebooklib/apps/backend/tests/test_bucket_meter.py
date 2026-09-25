@@ -545,3 +545,13 @@ def test_record_bucket_facts_should_persist_idempotently_with_config_hash(tmp_pa
         log, state, tmp_path / "none.jsonl", out, size=1, config_hash="abc123"
     )
     assert len(out.read_text(encoding="utf-8").splitlines()) == len(first_lines)
+
+
+def test_load_facts_should_skip_corrupt_lines(tmp_path):
+    from lib.bucket_meter import load_facts
+
+    p = tmp_path / "facts.jsonl"
+    p.write_text('{"event_id":"a","size":30}\nnot-json\n\n{"event_id":"b","size":30}\n', encoding="utf-8")
+    facts = load_facts(p)
+    assert [f["event_id"] for f in facts] == ["a", "b"]
+    assert load_facts(tmp_path / "missing.jsonl") == []
