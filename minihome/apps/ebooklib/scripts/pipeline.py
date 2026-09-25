@@ -312,6 +312,10 @@ def _add_to_dlq(item: dict, error: str) -> None:
 
 DOMAIN_CHECK_INTERVAL_SEC = 1800  # 30분 간격
 FEED_CHECK_INTERVAL_SEC = 1800    # 30분 간격 (공식 주소/점검 피드)
+# 완결 판정 임계 — 일시 장애로 완결이 되는 오판을 줄이기 위해 보수적으로 상향.
+NO_NEW_STREAK_COMPLETE = 3
+# auto-discover 주기(일). 도메인 이동/장애 후 신규 회차를 조기에 반영.
+AUTO_DISCOVER_INTERVAL_DAYS = 3
 _last_domain_check = [0.0]
 _last_feed_check = [0.0]
 _feed_maintenance = [None]  # True/False/None(미확인)
@@ -556,25 +560,36 @@ def _parse_bo_table() -> str:
 
 # === 1단계: DISCOVER — wr_id 발견 → 큐에 추가 ===
 
-def _update_novel_status_from_discover(meta: dict, added: int, novel_title: str) -> None:
+def _update_novel_status_from_discover(
+    meta: dict, added: int, novel_title: str, *, discovered_ok: bool = True
+) -> None:
     """discover 결과로 연재 상태를 갱신 (소스 기반 판단 — namu 의존 없음).
 
     - 신규 회차 발견(added>0) → 연재중 (활동 증거), no_new_streak 초기화
-    - 신규 0회차 → no_new_streak +1, 2연속이면 완결로 전환
-      → 완결 소설은 이후 월간 체크 목록에서 자동 제외
+    - 신규 0회차 → no_new_streak +1, **임계** 초과 시 완결
+    - [WHY] discover 자체가 실패/도메인 장애(`discovered_ok=False`)면 판정을 보류한다
+      — 일시 장애를 완결로 굳히면 이후 discover 대상에서 영구 제외되기 때문.
+    - 완결 판정은 **공식 메타(사용자 URL)가 우선**: `metadata_source == 'official'`이고
+      공식 상태가 '연재중'이면 소스 기반 완결 판정을 적용하지 않는다.
     """
     this_month = datetime.now().strftime('%Y-%m')
     meta['last_discover'] = this_month
+    if not discovered_ok:
+        log.info(f"  - {novel_title}: discover 실패/불가 — 완결 판정 보류(연재중 유지)")
+        return
     if added > 0:
         meta['status'] = '연재중'
         meta['no_new_streak'] = 0
         meta['last_new_episode'] = this_month
-    else:
-        streak = int(meta.get('no_new_streak', 0)) + 1
-        meta['no_new_streak'] = streak
-        if streak >= 2 and meta.get('status') != '완결':
-            meta['status'] = '완결'
-            log.info(f"  ✓ {novel_title}: 2개월 연속 신규 회차 0 → 완결로 판정")
+        return
+
+    streak = int(meta.get('no_new_streak', 0)) + 1
+    meta['no_new_streak'] = streak
+    if meta.get('metadata_source') == 'official' and meta.get('status') == '연재중':
+        return  # 공식 페이지가 연재중 → 소스 기반 완결 판정 보류
+    if streak >= NO_NEW_STREAK_COMPLETE and meta.get('status') != '완결':
+        meta['status'] = '완결'
+        log.info(f"  ✓ {novel_title}: {streak}회 연속 신규 회차 0 → 완결로 판정")
 
 
 def _normalize_toki_title(raw: str) -> str:
@@ -861,6 +876,7 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
     # 화산귀환 등 일부 작품은 spage로 페이징되므로 둘 다 시도
     # 전체 회차를 확인하기 위해 max_pages 상한을 크게 잡고, 회차가 없으면 자동 중단
     max_pages = max(max_pages, 200)
+    fetched_any = False
     for page_param in ("epage", "spage"):
         page_seen = set()
         no_new_count = 0
@@ -898,6 +914,7 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
                 log.info(f"  {page_param}={page}: 응답 없음, 중단")
                 break
 
+            fetched_any = True
             page_chapters = extract_chapter_wr_ids_from_index(html)
             if not page_chapters:
                 log.info(f"  {page_param}={page}: 회차 없음, 중단")
@@ -1031,7 +1048,9 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
             if cover_url:
                 meta['coverUrl'] = cover_url
             # 소스 기반 연재 상태 갱신 (완결 판정 포함)
-            _update_novel_status_from_discover(meta, added, novel_title)
+            _update_novel_status_from_discover(
+                meta, added, novel_title, discovered_ok=fetched_any
+            )
             with open(meta_file, 'w', encoding='utf-8') as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -1616,21 +1635,57 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
         log.info(f"enrich 시도: {novel_dir.name}")
-        try:
-            namu_meta = get_metadata(
-                meta.get('title', novel_dir.name),
-                download_cover_to=Path(f'/opt/ai_data/flaresolverr/covers/{novel_dir.name}.webp'),
-            )
-            if namu_meta:
-                from lib.storage import update_meta_from_namu
-                update_meta_from_namu(novel_dir.name, namu_meta)
-                results['enriched'] += 1
-                log.info(f"  ✓ {novel_dir.name}: 작가={namu_meta.get('author','?')}")
-            else:
-                log.info(f"  - {novel_dir.name}: namu.wiki 정보 없음")
-        except Exception as e:
-            results['errors'] += 1
-            log.warning(f"  ✗ {novel_dir.name}: {e}")
+
+        # 1순위: 사용자가 준 **공식 플랫폼 URL**(문피아/조아라/네이버)에서만 메타 조회
+        # (정확한 정본 데이터 — 임의 검색/추측 금지)
+        official_url = meta.get('meta_source_url') or meta.get('official_url') or ""
+        official_meta = None
+        if official_url:
+            try:
+                from services.metadata_official import get_metadata_from_url
+
+                official_meta = get_metadata_from_url(official_url)
+                if official_meta:
+                    from lib.storage import update_meta_from_official
+
+                    # 표지: 공식 작품 페이지 이미지가 가장 정확 → 로컬 저장 우선
+                    try:
+                        from services.metadata_official import cover_save_path, download_cover
+
+                        if official_meta.get("cover_url"):
+                            dest = cover_save_path(novel_dir.name)
+                            if download_cover(official_meta["cover_url"], dest):
+                                official_meta["cover_url"] = f"/api/covers/{dest.name}"
+                    except Exception as e:
+                        log.debug(f"공식 표지 저장 실패(URL 유지): {e}")
+
+                    update_meta_from_official(novel_dir.name, official_meta, media_type=meta.get('media_type'))
+                    results['enriched'] += 1
+                    log.info(
+                        f"  ✓ {novel_dir.name}: 공식({official_meta.get('source')}) "
+                        f"작가={official_meta.get('author','?')} 총화={official_meta.get('total_chapters')}"
+                    )
+            except Exception as e:
+                results['errors'] += 1
+                log.warning(f"  ✗ {novel_dir.name}: 공식 메타 실패 {e}")
+
+        # 2순위: 공식 URL이 없을 때만 namu.wiki로 보강(추측 아님 — 위키 근거)
+        if official_meta is None:
+            try:
+                namu_meta = get_metadata(
+                    meta.get('title', novel_dir.name),
+                    download_cover_to=Path(f'/opt/ai_data/flaresolverr/covers/{novel_dir.name}.webp'),
+                )
+                if namu_meta:
+                    from lib.storage import update_meta_from_namu
+                    update_meta_from_namu(novel_dir.name, namu_meta)
+                    results['enriched'] += 1
+                    log.info(f"  ✓ {novel_dir.name}: 작가={namu_meta.get('author','?')}")
+                else:
+                    log.info(f"  - {novel_dir.name}: namu.wiki 정보 없음")
+            except Exception as e:
+                results['errors'] += 1
+                log.warning(f"  ✗ {novel_dir.name}: {e}")
 
         # 표지 fallback: namu/소스에서 표지를 못 받았으면 웹 검색으로 재시도
         try:
@@ -2571,7 +2626,9 @@ def main():
         # PID 기록
         PID_FILE.write_text(str(os.getpid()))
         cycle = 0
-        last_discover_day = None  # 이번 달에 discover 실행했는지 추적
+        last_discover_day = None  # 마지막 auto-discover 날짜(YYYY-MM-DD) 추적
+        # 시작 시 도메인 이동/장애로 밀린 신규 회차를 조기에 반영하기 위해 1회 실행
+        _auto_discover_due = [True]
         # 다중 소스: 사이클 대기는 짧게, 소스별 페이싱은 run_collect 내부 딜레이가 담당
         cycle_delay = 1
         try:
@@ -2625,28 +2682,31 @@ def main():
                 except Exception as e:
                     log.warning(f"도메인 헬스체크 실패: {e}")
 
-                # 매월 1일 1회 연재작 새 회차 감지 (등록된 모든 소스)
-                today = datetime.now().strftime("%Y-%m")
-                if today != last_discover_day:
-                    if datetime.now().day == 1:
-                        last_discover_day = today
-                        log.info("discover: 매월 1일 연재작 새 회차 확인")
-                        try:
-                            _auto_discover()
-                        except Exception as e:
-                            log.warning(f"auto-discover 실패: {e}")
-                        # 실패한 웹툰 이미지 재다운로드 체크 (CDN 복구 대비)
-                        try:
-                            retry_failed_webtoon_images()
-                        except Exception as e:
-                            log.warning(f"웹툰 이미지 재시도 실패: {e}")
-                        # 누락 화수 추적 갱신 (missing.json) — 소스가 채워진 누락/빈 챕터 파악
-                        try:
-                            run_check_gaps()
-                        except Exception as e:
-                            log.warning(f"check-gaps 실패: {e}")
-                    else:
-                        pass
+                # 연재작 새 회차 감지 — 시작 직후 1회 + 이후 AUTO_DISCOVER_INTERVAL_DAYS일마다
+                today_date = datetime.now().strftime("%Y-%m-%d")
+                _due = _auto_discover_due[0] or (
+                    last_discover_day is None
+                    or (datetime.now() - datetime.strptime(last_discover_day, "%Y-%m-%d")).days
+                    >= AUTO_DISCOVER_INTERVAL_DAYS
+                )
+                if _due:
+                    _auto_discover_due[0] = False
+                    last_discover_day = today_date
+                    log.info(f"discover: 연재작 새 회차 확인 (주기 {AUTO_DISCOVER_INTERVAL_DAYS}일)")
+                    try:
+                        _auto_discover()
+                    except Exception as e:
+                        log.warning(f"auto-discover 실패: {e}")
+                    # 실패한 웹툰 이미지 재다운로드 체크 (CDN 복구 대비)
+                    try:
+                        retry_failed_webtoon_images()
+                    except Exception as e:
+                        log.warning(f"웹툰 이미지 재시도 실패: {e}")
+                    # 누락 화수 추적 갱신 (missing.json) — 소스가 채워진 누락/빈 챕터 파악
+                    try:
+                        run_check_gaps()
+                    except Exception as e:
+                        log.warning(f"check-gaps 실패: {e}")
 
                 # collect — 소스별 1개씩 처리 (처리 격리)
                 # toki31(유료 프록시)이 일일 한도/실패로 중단돼도 bookto31(무료)은 계속.

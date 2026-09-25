@@ -195,6 +195,56 @@ def _update_meta(
         pass
 
 
+def update_meta_from_official(
+    novel_title: str,
+    official_meta: dict,
+    media_type: Optional[str] = None,
+) -> bool:
+    """사용자 제공 공식 플랫폼(문피아/조아라/네이버) 메타로 meta.json 갱신.
+
+    [WHY] 공식 작품 페이지가 정본이므로 제목/작가/총화수/연재상태를 그대로 반영한다
+    (namu와 달리 status도 신뢰). `meta_source_url`은 사용자 입력이므로 보존한다.
+    """
+    novel_id = novel_title.replace(" ", "_").replace("/", "_")
+    if media_type is not None:
+        novel_dir = novel_dir_for(novel_title, media_type)
+    else:
+        novel_dir = find_novel_dir(novel_id) or novel_dir_for(novel_title)
+    meta_file = novel_dir / "meta.json"
+
+    if not meta_file.exists():
+        return False
+
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        if official_meta.get("title"):
+            meta["title"] = official_meta["title"]
+        if official_meta.get("author"):
+            meta["author"] = official_meta["author"]
+        if official_meta.get("cover_url"):
+            meta["coverUrl"] = official_meta["cover_url"]
+        if official_meta.get("description"):
+            meta["description"] = official_meta["description"]
+        if official_meta.get("genre"):
+            meta["genre"] = official_meta["genre"]
+        if official_meta.get("total_chapters"):
+            meta["totalChapters"] = int(official_meta["total_chapters"])
+        if official_meta.get("status") and official_meta["status"] != "unknown":
+            meta["status"] = official_meta["status"]
+        meta["official_source"] = official_meta.get("source")
+        if official_meta.get("source_url"):
+            meta["official_url"] = official_meta["source_url"]
+        meta["metadata_source"] = "official"
+
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def update_meta_from_namu(
     novel_title: str,
     namu_meta: dict,

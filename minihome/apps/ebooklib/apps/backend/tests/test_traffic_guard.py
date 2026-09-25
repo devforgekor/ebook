@@ -543,3 +543,123 @@ class TestOfficialFeed:
         raw = json.loads(f.read_text(encoding="utf-8"))
         assert "sbxh9.com" in raw["toki31"]["domains"]
         assert raw["toki31"]["base_url"] == "https://newtoki31.com"
+
+
+class TestOfficialMetadata:
+    def test_should_detect_supported_platforms(self):
+        from services.metadata_official import detect_platform
+
+        assert detect_platform("https://series.naver.com/novel/detail.series?productNo=1") == "naver"
+        assert detect_platform("https://novel.munpia.com/12345") == "munpia"
+        assert detect_platform("https://www.joara.com/book/1") == "joara"
+        assert detect_platform("https://unknown.example/x") is None
+
+    def test_should_parse_naver_json_ld(self):
+        from services.metadata_official import parse_platform
+
+        html = '''
+        <html><head><meta property="og:title" content="폴백제목">
+        <script type="application/ld+json">
+        {"@type":"Book","name":"절대회귀","author":{"name":"이블라인"},
+         "description":"회귀물","image":"https://img/x.jpg"}
+        </script>
+        <span>작가</span><span>무시됨</span>
+        <div>총 350화</div><div>연재중</div>
+        </head></html>
+        '''
+        out = parse_platform("naver", html, "https://series.naver.com/x")
+        assert out["title"] == "절대회귀"
+        assert out["author"] == "이블라인"
+        assert out["total_chapters"] == 350
+        assert out["status"] == "연재중"
+        assert out["source"] == "official:naver"
+
+    def test_should_parse_munpia_labels_when_no_jsonld(self):
+        from services.metadata_official import parse_platform
+
+        html = '<meta property="og:title" content="작품A"><div>작가</div><div>홍길동</div><div>총 123화</div><div>완결</div>'
+        out = parse_platform("munpia", html, "https://novel.munpia.com/1")
+        assert out["title"] == "작품A"
+        assert out["author"] == "홍길동"
+        assert out["total_chapters"] == 123
+        assert out["status"] == "완결"
+
+    def test_fetch_should_return_none_for_unsupported(self):
+        from services.metadata_official import fetch
+
+        assert fetch("https://unsupported.example/x", fetcher=lambda u: "<html/>") is None
+
+    def test_fetch_should_use_fetcher_for_supported(self):
+        from services.metadata_official import fetch
+
+        out = fetch(
+            "https://novel.munpia.com/1",
+            fetcher=lambda u: '<meta property="og:title" content="T"><div>작가</div><div>A</div>',
+        )
+        assert out and out["title"] == "T" and out["author"] == "A"
+
+
+class TestOfficialMetaStorage:
+    def test_update_meta_from_official_should_apply_total_and_status(self, tmp_path, monkeypatch):
+        import json
+
+        import lib.storage as storage
+        import lib.paths as paths
+
+        d = tmp_path / "절대회귀"
+        d.mkdir()
+        (d / "meta.json").write_text(
+            json.dumps({"title": "절대회귀", "totalChapters": 187, "status": "연재중", "meta_source_url": "u"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(storage, "find_novel_dir", lambda nid: d)
+        monkeypatch.setattr(paths, "find_novel_dir", lambda nid: d)
+        ok = storage.update_meta_from_official(
+            "절대회귀",
+            {"title": "절대회귀", "author": "이블라인", "total_chapters": 350, "status": "연재중",
+             "source": "official:naver", "source_url": "u"},
+        )
+        assert ok is True
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        assert meta["author"] == "이블라인"
+        assert meta["totalChapters"] == 350
+        assert meta["metadata_source"] == "official"
+
+
+class TestDiscoverCompletion:
+    def _meta(self):
+        return {"title": "T", "status": "연재중", "no_new_streak": 0}
+
+    def test_discover_failure_should_not_count_toward_completion(self):
+        import importlib.util
+        import sys as _s
+
+        # pipeline 모듈은 스크립트라 함수만 직접 로드
+        _s.path.insert(0, "scripts")
+        import pipeline as pl
+
+        meta = self._meta()
+        pl._update_novel_status_from_discover(meta, 0, "T", discovered_ok=False)
+        assert meta["no_new_streak"] == 0
+        assert meta["status"] == "연재중"
+
+    def test_should_complete_after_threshold_zero_discovers(self):
+        _s_pl = __import__("scripts.pipeline", fromlist=["x"]) if False else None
+        import sys as _sys
+        _sys.path.insert(0, "scripts")
+        import pipeline as pl
+
+        meta = self._meta()
+        for _ in range(pl.NO_NEW_STREAK_COMPLETE):
+            pl._update_novel_status_from_discover(meta, 0, "T", discovered_ok=True)
+        assert meta["status"] == "완결"
+
+    def test_official_ongoing_should_block_completion(self):
+        import sys as _sys
+        _sys.path.insert(0, "scripts")
+        import pipeline as pl
+
+        meta = {"title": "T", "status": "연재중", "no_new_streak": 0, "metadata_source": "official"}
+        for _ in range(pl.NO_NEW_STREAK_COMPLETE + 2):
+            pl._update_novel_status_from_discover(meta, 0, "T", discovered_ok=True)
+        assert meta["status"] == "연재중"
