@@ -26,7 +26,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import mean, median
+from statistics import mean, median, stdev
 
 BUCKET_SIZES = (20, 30, 50)
 DEFAULT_BUCKET_SIZE = 30
@@ -463,6 +463,32 @@ def report(facts: Sequence[dict]) -> dict:
             sum(f["api_mb_delta"] for f in facts if f["api_mb_delta"]), 3
         ),
         "chapters_total": sum(f["consumed_chapters"] for f in facts),
+    }
+
+
+def bucket_baseline_stats(
+    log_path: str | Path = DEFAULT_LOG_PATH,
+    size: int = DEFAULT_BUCKET_SIZE,
+) -> dict | None:
+    """과거 완결·웜 버킷만으로 회차당 KB 기준선(중앙값)과 σ를 산출.
+
+    - API가 필요 없다(r 불필요) → 수집 로그만으로 초기 시딩 가능.
+    - 콜드가 포함된 버킷/미완결/미저장 버킷은 제외한다.
+    - 표본 2개 미만이면 None.
+    """
+    chapters = load_chapters(log_path)
+    vals: list[float] = []
+    for start in range(0, len(chapters), size):
+        group = chapters[start : start + size]
+        if len(group) < size or not all(c.warm and c.saved and c.bytes > 0 for c in group):
+            continue
+        vals.append(sum(c.bytes for c in group) / _KB / size)
+    if len(vals) < 2:
+        return None
+    return {
+        "n": len(vals),
+        "kb_per_chapter_median": round(median(vals), 2),
+        "kb_per_chapter_stdev": round(stdev(vals), 3),
     }
 
 

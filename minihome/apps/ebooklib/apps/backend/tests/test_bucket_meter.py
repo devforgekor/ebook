@@ -477,3 +477,25 @@ def test_parse_log_lines_should_mark_first_chapter_of_each_day_cold():
     assert chapters[0].warm is False
     assert chapters[1].warm is True
     assert chapters[2].warm is False
+
+
+def test_bucket_baseline_stats_should_use_warm_buckets_only(tmp_path):
+    from lib.bucket_meter import bucket_baseline_stats
+
+    log = tmp_path / "collect.log"
+    lines = []
+
+    def add(wr, kb):
+        lines.append(f"2026-09-23 01:00:00,000 [INFO] [1/1] wr_id={wr} source=toki31 시도 1/3")
+        lines.append(f"2026-09-23 01:00:05,000 [INFO]   📊 트래픽: {kb}.0KB [웜] (누적 1MB/200MB)")
+        lines.append(f"2026-09-23 01:00:06,000 [INFO]   ✓ wr_id={wr} 저장 완료")
+
+    for wr, kb in [(1, 800), (2, 200), (3, 202), (4, 198), (5, 202), (6, 202)]:
+        add(wr, kb)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    stats = bucket_baseline_stats(log, size=2)
+    assert stats is not None
+    assert stats["n"] == 2  # 첫 버킷은 콜드 포함으로 제외
+    assert stats["kb_per_chapter_median"] == 201.0
+    assert stats["kb_per_chapter_stdev"] > 0

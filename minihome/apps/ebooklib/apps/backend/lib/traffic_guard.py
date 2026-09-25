@@ -346,6 +346,43 @@ def clear_calibration_emergency() -> None:
         _state_unlock(lock)
 
 
+def get_bucket_baseline() -> Optional[float]:
+    """현재 버킷 기준선(KB/화) — 없으면 None."""
+    try:
+        value = load_state().get('bucket_kb_ewma')
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def seed_bucket_baseline(
+    kb_per_chapter: float, stdev: float, samples: Optional[int] = None
+) -> bool:
+    """과거 완결·웜 버킷으로 초기 기준선/σ를 시딩(1회; 기존 값이 있으면 미덮음).
+
+    시딩 시 samples를 최소 표본 이상으로 두어 즉시 판정을 시작한다.
+    """
+    lock = _state_lock()
+    try:
+        state = load_state()
+        if state.get('bucket_kb_ewma') is not None:
+            return False
+        state['bucket_kb_ewma'] = round(float(kb_per_chapter), 4)
+        state['bucket_kb_var_ewma'] = round(float(stdev) ** 2, 6)
+        state['bucket_samples'] = int(
+            samples if samples is not None else BUCKET_ANOMALY_MIN_SAMPLES
+        )
+        state['bucket_seeded_at'] = time.time()
+        save_state(state)
+        logger.info(
+            f"버킷 기준선 시딩: {kb_per_chapter:.1f}KB/화 σ={stdev:.2f} "
+            f"(n>={state['bucket_samples']})"
+        )
+        return True
+    finally:
+        _state_unlock(lock)
+
+
 def update_bucket_anomaly(
     kb_per_chapter: float, event_id: Optional[str] = None, cold: bool = False
 ) -> dict:

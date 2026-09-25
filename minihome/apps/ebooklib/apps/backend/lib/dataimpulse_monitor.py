@@ -336,8 +336,24 @@ def check_dataimpulse_sync() -> dict:
 
     # 버킷 소비 급증 안전망 — 완결·웜 버킷 회차당 KB vs 진화 기준선(중복 평가 방지)
     try:
-        from lib.bucket_meter import kb_per_chapter, latest_completed_warm_bucket
-        from lib.traffic_guard import update_bucket_anomaly
+        from lib.bucket_meter import (
+            bucket_baseline_stats,
+            kb_per_chapter,
+            latest_completed_warm_bucket,
+        )
+        from lib.traffic_guard import (
+            get_bucket_baseline,
+            seed_bucket_baseline,
+            update_bucket_anomaly,
+        )
+
+        # 초기 기준선은 과거 완결·웜 버킷에서 1회 시딩(콜드는 제외됨)
+        if get_bucket_baseline() is None:
+            stats = bucket_baseline_stats()
+            if stats:
+                seed_bucket_baseline(
+                    stats["kb_per_chapter_median"], stats["kb_per_chapter_stdev"]
+                )
 
         fact = latest_completed_warm_bucket()
         if fact is not None:

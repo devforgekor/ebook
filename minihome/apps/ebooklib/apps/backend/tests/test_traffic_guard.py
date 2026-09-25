@@ -362,3 +362,19 @@ class TestColdBuckets:
         assert r["cold_exceeded"] is True
         assert r["streak"] == 0
         assert tg.is_bucket_anomaly_stop() is False
+
+
+class TestSeed:
+    def test_seed_should_initialize_baseline_once(self, state):
+        assert tg.seed_bucket_baseline(187.8, 0.9) is True
+        s = tg.load_state()
+        assert s["bucket_kb_ewma"] == 187.8
+        assert s["bucket_samples"] >= tg.BUCKET_ANOMALY_MIN_SAMPLES
+        assert tg.seed_bucket_baseline(999.0, 1.0) is False  # 멱등
+        assert tg.load_state()["bucket_kb_ewma"] == 187.8
+
+    def test_seeded_baseline_should_judge_immediately(self, state):
+        tg.seed_bucket_baseline(187.8, 0.9)
+        r = tg.update_bucket_anomaly(225.4)  # +20.1%
+        assert r["dev_pct"] is not None
+        assert r["streak"] == 1
