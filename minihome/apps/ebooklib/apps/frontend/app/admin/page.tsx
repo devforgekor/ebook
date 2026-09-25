@@ -2,14 +2,16 @@
 
 import { useState, useEffect, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { getServerSnapshot, getSnapshot, signIn, signOut, subscribe } from "@/lib/adminAuth";
+import { getServerSnapshot, getSnapshot, getPassword, signIn, signOut, subscribe } from "@/lib/adminAuth";
 
-const ADMIN_PASSWORD = "";
+const ADMIN_USER_DEFAULT = "admin";
 
 export default function AdminPage() {
   const authenticated = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const [loginUser, setLoginUser] = useState(ADMIN_USER_DEFAULT);
   const [loginPw, setLoginPw] = useState("");
   const [loginError, setLoginError] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
 
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -103,13 +105,26 @@ export default function AdminPage() {
     return () => clearInterval(interval);
   }, [authenticated]);
 
-  function handleLogin(e: React.FormEvent) {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
-    if (loginPw === ADMIN_PASSWORD) {
-      setLoginError(false);
-      signIn();
-    } else {
+    setLoginLoading(true);
+    setLoginError(false);
+    try {
+      // 서버측 검증 (클라이언트 하드코딩 없음)
+      const res = await fetch("/api/pipeline/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: loginUser, password: loginPw }),
+      });
+      if (res.ok) {
+        signIn(loginUser, loginPw);
+      } else {
+        setLoginError(true);
+      }
+    } catch {
       setLoginError(true);
+    } finally {
+      setLoginLoading(false);
     }
   }
 
@@ -126,7 +141,7 @@ export default function AdminPage() {
       const res = await fetch("/api/pipeline/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: ADMIN_PASSWORD, url }),
+        body: JSON.stringify({ password: getPassword(), url }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -158,6 +173,20 @@ export default function AdminPage() {
           </h1>
           <form onSubmit={handleLogin} className="space-y-4 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
             <div>
+              <label htmlFor="loginUser" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                아이디
+              </label>
+              <input
+                id="loginUser"
+                type="text"
+                value={loginUser}
+                onChange={(e) => { setLoginUser(e.target.value); setLoginError(false); }}
+                placeholder="관리자 아이디"
+                autoComplete="username"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              />
+            </div>
+            <div>
               <label htmlFor="loginPw" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 비밀번호
               </label>
@@ -167,18 +196,20 @@ export default function AdminPage() {
                 value={loginPw}
                 onChange={(e) => { setLoginPw(e.target.value); setLoginError(false); }}
                 placeholder="관리자 비밀번호를 입력하세요"
+                autoComplete="current-password"
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
                 autoFocus
               />
               {loginError && (
-                <p className="text-sm text-red-500 mt-1">비밀번호가 일치하지 않습니다</p>
+                <p className="text-sm text-red-500 mt-1">아이디 또는 비밀번호가 일치하지 않습니다</p>
               )}
             </div>
             <button
               type="submit"
-              className="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+              disabled={loginLoading}
+              className="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
             >
-              로그인
+              {loginLoading ? "확인 중..." : "로그인"}
             </button>
           </form>
         </div>
@@ -268,13 +299,31 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* 현재 진행 중인 작업 */}
+        {pipelineStatus?.current_job && (
+          <div className="mt-6 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+              현재 진행 중인 작업
+            </h2>
+            <div className="space-y-2 text-sm">
+              <p><b>소설 ID:</b> {pipelineStatus.current_job.novel_id}</p>
+              <p><b>제목:</b> {pipelineStatus.current_job.title}</p>
+              <p><b>상태:</b> {pipelineStatus.current_job.status}</p>
+              {pipelineStatus.current_job.message && (
+                <p className="text-gray-600 dark:text-gray-400">{pipelineStatus.current_job.message}</p>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 진행 중인 작업 / 완료된 작업 */}
         {pipelineStatus?.novels && pipelineStatus.novels.length > 0 && (() => {
           const nextTitle = pipelineStatus.queue?.next_item?.novel_title;
+          const currentNovelId = pipelineStatus.current_job?.novel_id;
           const inProgress = pipelineStatus.novels
-            .filter((n) => !n.collection_done)
+            .filter((n) => !n.collection_done && n.id !== currentNovelId)
             .sort((a, b) => (a.title === nextTitle ? -1 : 0) - (b.title === nextTitle ? -1 : 0));
-          const completed = pipelineStatus.novels.filter((n) => n.collection_done);
+          const completed = pipelineStatus.novels.filter((n) => n.collection_done && n.id !== currentNovelId);
 
           const fmtEta = (sec?: number | null): string | null => {
             if (!sec || sec <= 0) return null;
@@ -365,7 +414,7 @@ export default function AdminPage() {
                 const res = await fetch("/api/pipeline/reset", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ password: ADMIN_PASSWORD }),
+                  body: JSON.stringify({ password: getPassword() }),
                 });
                 const data = await res.json();
                 alert(data.message);

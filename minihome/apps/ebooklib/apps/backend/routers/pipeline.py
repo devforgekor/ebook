@@ -15,11 +15,13 @@ URL 패턴:
   newtoki:  https://toki31.com/novel/58455
 """
 
+import hmac
 import json
 import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -35,13 +37,27 @@ log = logging.getLogger("pipeline_router")
 
 router = APIRouter()
 
-# 비밀번호 (환경변수 또는 기본값)
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# 비밀번호 — Azure Key Vault(EBOOK-ADMIN-PASSWORD)에서 kv-fetch-env.py가 주입.
+# 코드/기본값 하드코딩 금지. 미설정 시 빈 문자열 → 모든 인증 거부(안전).
+ADMIN_PASSWORD = os.getenv("EBOOK_ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD", "")
+if not ADMIN_PASSWORD:
+    log.warning("EBOOK_ADMIN_PASSWORD 미설정 — 관리자 인증이 모두 거부됩니다 (KV 주입 확인)")
+
+# 관리자 아이디 (비밀 아님, 기본 "admin")
+ADMIN_USER = os.getenv("EBOOK_ADMIN_USER", "admin")
+
+
+def _secret_matches(candidate: str) -> bool:
+    """[WHY] 평문 `!=` 비교는 내용/길이에 따라 타이밍이 갈리므로 상수시간 비교를 쓴다."""
+    return hmac.compare_digest(
+        (candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")
+    )
 
 # 파이프라인 스크립트 경로
 PIPELINE_SCRIPT = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "pipeline.py"
 WATCHER_DIR = Path("/opt/ai_data/flaresolverr/ebook_watcher")
 QUEUE_FILE = WATCHER_DIR / "queue.json"
+JOBS_FILE = WATCHER_DIR / "jobs.json"
 
 
 # ============================================================
@@ -89,11 +105,106 @@ _JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
 
 
+def _save_jobs_unlocked() -> None:
+    """호출부가 _JOBS_LOCK을 이미 보유한 상태에서 jobs.json에 저장."""
+    try:
+        JOBS_FILE.write_text(
+            json.dumps(_JOBS, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log.warning(f"jobs.json 저장 실패: {e}")
+
+
+def _collect_process_running(source: str = "") -> bool:
+    """collect 서브프로세스 생존 여부 (백엔드 재시작 후 orphan 감지)."""
+    pattern = "pipeline.py collect" + (f" --source {source}" if source else "")
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _load_jobs() -> None:
+    """재시작 후 jobs.json 복원. 진행 중 스레드는 사라진 상태로 정리한다."""
+    if not JOBS_FILE.exists():
+        return
+    try:
+        data = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"jobs.json 읽기 실패: {e}")
+        return
+    if not isinstance(data, dict):
+        return
+    now = time.time()
+    changed = False
+    for key, job in data.items():
+        if not isinstance(job, dict):
+            continue
+        status = job.get("status") or ""
+        if status == "완료":
+            _JOBS[key] = job
+            continue
+        source = job.get("source") or ""
+        if status == "수집 중" and _collect_process_running(source):
+            job["status"] = "수집 중"
+            job["message"] = "백엔드 재시작 — 외부 수집 프로세스가 계속 진행 중입니다"
+            job["started_at"] = now
+            _JOBS[key] = job
+        else:
+            job["status"] = "중단"
+            job["message"] = "백엔드 재시작으로 작업 스레드가 중단되었습니다"
+            job["started_at"] = now
+            _JOBS[key] = job
+        changed = True
+    if changed:
+        _save_jobs_unlocked()
+        log.info(f"jobs.json 복원: {len(_JOBS)}건 (진행 중 스레드는 재시작 시 중단 처리)")
+
+
+def _promote_novel_to_queue_front(novel_title: str) -> None:
+    """즉시 collect 전에 제출 소설의 큐 항목을 선두로 승격 (FIFO 선두 대기 해소)."""
+    if not novel_title or not QUEUE_FILE.exists():
+        return
+    try:
+        with open(QUEUE_FILE, encoding="utf-8") as f:
+            queue = json.load(f)
+        if not isinstance(queue, list) or not queue:
+            return
+        target = [it for it in queue if it.get("novel_title") == novel_title]
+        if not target:
+            return
+        if queue[: len(target)] == target:
+            return
+        rest = [it for it in queue if it.get("novel_title") != novel_title]
+        new_queue = target + rest
+        if new_queue == queue:
+            return
+        tmp = QUEUE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(new_queue, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(QUEUE_FILE)
+        log.info(f"큐 승격: {novel_title} {len(target)}건을 선두로 이동")
+    except Exception as e:
+        log.warning(f"큐 승격 실패: {e}")
+
+
+_load_jobs()
+
+
 def _extract_title(source: str, wr_id: str, bo_table: str = "novel") -> str:
     """제목 추출 (discover --dry-run 한 번만 실행)."""
     script = str(PIPELINE_SCRIPT)
     try:
-        cmd = ["python3", script, "discover", wr_id, "--dry-run", "--source", source]
+        cmd = [sys.executable, script, "discover", wr_id, "--dry-run", "--source", source]
         if bo_table:
             cmd += ["--bo-table", bo_table]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -105,8 +216,83 @@ def _extract_title(source: str, wr_id: str, bo_table: str = "novel") -> str:
     return f"소설 {wr_id}"
 
 
+def _get_active_source(exclude_job_key: str = "") -> Optional[str]:
+    """현재 진행 중인 작업/루프의 source. 없으면 None.
+
+    1) 다른 진행 중인 _JOBS (exclude_job_key는 호출 중인 자기 자신)
+       — 중단/완료는 진행 중 아님
+    2) status.json progress — 동시 수집 시 sources.* 에서 활성 소스 우선 탐색
+    """
+    active_statuses = {"시작 중", "제목 추출 중", "회차 탐색 중", "수집 중"}
+    with _JOBS_LOCK:
+        for key, job in _JOBS.items():
+            if key == exclude_job_key:
+                continue
+            if job.get("status") in active_statuses and job.get("source"):
+                return job["source"]
+    progress = get_progress()
+    # 동시 수집: 소스별 스냅샷에서 아직 current가 살아 있는 소스
+    for src, snap in (progress.get("sources") or {}).items():
+        if isinstance(snap, dict) and snap.get("current"):
+            return snap.get("source") or src
+    current = progress.get("current") or {}
+    if current.get("source"):
+        return current["source"]
+    src = progress.get("source")
+    if src and src != "all":
+        return src
+    return None
+
+
+def _get_active_sources(exclude_job_key: str = "") -> set:
+    """수집/진행 중인 모든 source 집합 (동시 수집 라우팅용)."""
+    active_statuses = {"시작 중", "제목 추출 중", "회차 탐색 중", "수집 중"}
+    active: set = set()
+    with _JOBS_LOCK:
+        for key, job in _JOBS.items():
+            if key == exclude_job_key:
+                continue
+            if job.get("status") in active_statuses and job.get("source"):
+                active.add(job["source"])
+    progress = get_progress()
+    for src, snap in (progress.get("sources") or {}).items():
+        if isinstance(snap, dict) and snap.get("current"):
+            active.add(snap.get("source") or src)
+    current = progress.get("current") or {}
+    if current.get("source"):
+        active.add(current["source"])
+    src = progress.get("source")
+    if src and src != "all":
+        active.add(src)
+    return active
+
+
+def _should_immediate_collect(source: str, job_key: str) -> bool:
+    """제출 소스에 대한 즉시 collect 실행 여부 (동시 수집).
+
+    - 같은 소스가 이미 수집 중 → False (FIFO / 같은 소스 락 직렬화)
+    - 다른 소스가 수집 중이거나 활성 작업이 없고 루프가 다른 소스만 돌리고 있으면
+      → True (소스별 병렬 락으로 즉시 병렬 수집 가능)
+    - 활성 소스가 제출 소스와만 같거나, 완전히 유휴(루프 미가동 포함 판단은 호출부) →
+      기존과 같이 다른 소스 존재 시에만 즉시 실행
+    """
+    active = _get_active_sources(exclude_job_key=job_key)
+    if source in active:
+        return False
+    # 다른 소스가 활성 → 즉시 병렬 수집
+    if active:
+        return True
+    # 활성 없음 → 기존 루프 시작 경로 유지 (제출 즉시 collect 아님)
+    return False
+
+
 def _run_pipeline_job(source: str, novel_id: str, bo_table: str = "novel", preset_title: str = "") -> None:
-    """백그라운드: 제목 추출 → discover 큐 등록 → loop 시작."""
+    """백그라운드: 제목 추출 → discover → 소스 비교 → 즉시 collect 또는 loop 시작.
+
+    사이트(source) 비교:
+      - 진행 중인 소스와 다르면 → discover 후 즉시 collect (큐에만 두지 않음)
+      - 같거나 진행 중인 소스가 없으면 → 기존처럼 큐 등록 + loop 시작/유지
+    """
     script = str(PIPELINE_SCRIPT)
     job_key = f"{bo_table or 'novel'}:{novel_id}"
 
@@ -114,6 +300,14 @@ def _run_pipeline_job(source: str, novel_id: str, bo_table: str = "novel", prese
         with _JOBS_LOCK:
             if job_key in _JOBS:
                 _JOBS[job_key].update(kw)
+                _save_jobs_unlocked()
+
+    def _touch():
+        """긴 collect 중에도 stale(5분) purge에 걸리지 않도록 갱신."""
+        with _JOBS_LOCK:
+            if job_key in _JOBS:
+                _JOBS[job_key]["started_at"] = time.time()
+                _save_jobs_unlocked()
 
     _update(status="제목 추출 중")
     title = _extract_title(source, novel_id, bo_table)
@@ -122,7 +316,7 @@ def _run_pipeline_job(source: str, novel_id: str, bo_table: str = "novel", prese
     _update(status="회차 탐색 중")
     try:
         # 전체 회차 확인 (max_pages 200) — 시간이 걸릴 수 있어 timeout 넉넉히
-        cmd = ["python3", script, "discover", novel_id, title, "200", "--source", source]
+        cmd = [sys.executable, script, "discover", novel_id, title, "200", "--source", source]
         if bo_table:
             cmd += ["--bo-table", bo_table]
         result = subprocess.run(cmd, timeout=600, capture_output=True, text=True)
@@ -133,11 +327,42 @@ def _run_pipeline_job(source: str, novel_id: str, bo_table: str = "novel", prese
     except Exception as e:
         log.error(f"discover 실행 실패: {e}")
 
-    if not is_loop_running():
+    immediate = _should_immediate_collect(source, job_key)
+    if immediate:
+        # 다른 사이트 → 큐에만 두지 않고 즉시 collect (run_all 방식)
+        # 같은 소스 기존 FIFO 대기로 제출작이 뒤로 밀리지 않도록 선두 승격
+        _promote_novel_to_queue_front(title)
+        _update(status="수집 중", message=f"다른 소스({source}) 감지 — 즉시 수집을 시작합니다")
+        try:
+            cmd = [sys.executable, script, "collect", "--source", source]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            # 진행 중 started_at 갱신 (최대 2시간 — 대작 기준)
+            deadline = time.time() + 7200
+            while proc.poll() is None and time.time() < deadline:
+                _touch()
+                time.sleep(15)
+            if proc.poll() is None:
+                proc.kill()
+                _update(message="즉시 수집 타임아웃(2시간) — 강제 종료")
+            elif proc.returncode != 0:
+                out = (proc.stdout.read() or "") if proc.stdout else ""
+                log.warning(f"즉시 collect 오류: {out[:500]}")
+                _update(message="즉시 수집 중 오류 발생 — 큐에 남은 항목은 루프가 처리합니다")
+            else:
+                _update(message="다른 소스 감지 — 즉시 수집을 완료했습니다")
+        except Exception as e:
+            log.error(f"즉시 collect 실행 실패: {e}")
+            _update(message=f"즉시 수집 실패: {e} — 큐에 남은 항목은 루프가 처리합니다")
+    elif not is_loop_running():
         try:
             log_path = WATCHER_DIR / "pipeline_output.log"
             subprocess.Popen(
-                ["nohup", "python3", script, "loop", title, "--source", source],
+                ["nohup", sys.executable, script, "loop", title, "--source", source],
                 stdout=open(log_path, "a"),
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setpgrp,
@@ -147,6 +372,20 @@ def _run_pipeline_job(source: str, novel_id: str, bo_table: str = "novel", prese
             _update(message=f"루프 시작 실패: {e}")
     else:
         _update(message="파이프라인 루프가 이미 실행 중입니다")
+
+    # 즉시 collect 후에도 루프가 없으면 시작 (이후 연재분 처리용)
+    if immediate and not is_loop_running():
+        try:
+            log_path = WATCHER_DIR / "pipeline_output.log"
+            subprocess.Popen(
+                ["nohup", sys.executable, script, "loop", title, "--source", source],
+                stdout=open(log_path, "a"),
+                stderr=subprocess.STDOUT,
+                preexec_fn=os.setpgrp,
+            )
+            log.info("즉시 collect 후 루프를 시작했습니다")
+        except Exception as e:
+            log.warning(f"즉시 collect 후 루프 시작 실패: {e}")
 
     _update(status="완료")
 
@@ -333,7 +572,7 @@ def get_novel_status() -> list[dict]:
                 total = saved + q_count
             else:
                 total = meta_total if meta_total >= saved else saved
-            collection_done = (not queued) and (total > 0) and (saved >= total)
+            collection_done = (not queued) and (total > 0) and (saved >= total) and status != "연재중"
             novels.append({
                 "id": novel_dir.name,
                 "title": title,
@@ -366,6 +605,11 @@ def get_progress() -> dict:
 # API 엔드포인트
 # ============================================================
 
+class AuthRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
 class StartPipelineRequest(BaseModel):
     password: str
     url: str
@@ -382,6 +626,16 @@ class StartPipelineResponse(BaseModel):
     loop_running: bool = False
 
 
+@router.post("/pipeline/auth")
+async def pipeline_auth(req: AuthRequest):
+    """관리자 로그인 검증 (서버측). 클라이언트 하드코딩 대신 이 엔드포인트로 확인."""
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="관리자 인증이 구성되지 않았습니다")
+    if req.username != ADMIN_USER or not _secret_matches(req.password):
+        raise HTTPException(status_code=403, detail="아이디 또는 비밀번호가 일치하지 않습니다")
+    return {"ok": True, "username": ADMIN_USER}
+
+
 @router.post("/pipeline/start", response_model=StartPipelineResponse)
 async def start_pipeline(req: StartPipelineRequest):
     """파이프라인 시작 — URL 입력 → 자동 분기 → 백그라운드 실행.
@@ -389,7 +643,7 @@ async def start_pipeline(req: StartPipelineRequest):
     Admin 페이지에서 호출. 즉시 응답, 실제 작업은 백그라운드 스레드로.
     """
     # 1. 비밀번호 검증
-    if req.password != ADMIN_PASSWORD:
+    if not _secret_matches(req.password):
         raise HTTPException(status_code=403, detail="비밀번호가 일치하지 않습니다")
 
     # 제출 URL 기록 (도메인 수시 변경 추적/분석용)
@@ -417,27 +671,38 @@ async def start_pipeline(req: StartPipelineRequest):
         )
     log.info("pipeline/start 파싱 완료: url=%s → source=%s id=%s bo=%s", req.url, source, novel_id, bo_table)
 
-    # 3. 중복 시작 방지 + 고정 작업 자동 제거 (5분 초과)
+    # 3. 중복 시작 방지 + 고정 작업 자동 제거
+    #    discover(최대 600s)/즉시 collect(최대 7200s)는 의도적으로 오래 걸릴 수 있어
+    #    status별 stale 임계값을 다르게 적용한다.
+    _STALE_SEC = {
+        "회차 탐색 중": 660,
+        "수집 중": 7500,
+    }
     with _JOBS_LOCK:
         job_key = f"{bo_table or 'novel'}:{novel_id}"
         now = time.time()
         stale_keys = [
             k for k, v in _JOBS.items()
-            if v.get("started_at") and now - v["started_at"] > 300 and v["status"] != "완료"
+            if v.get("started_at")
+            and v["status"] != "완료"
+            and now - v["started_at"] > _STALE_SEC.get(v["status"], 300)
         ]
         for k in stale_keys:
             log.info(f"고정된 작업 자동 제거: {k}")
             del _JOBS[k]
         if job_key in _JOBS and _JOBS[job_key]["status"] != "완료":
-            return StartPipelineResponse(
-                ok=True,
-                source=source,
-                novel_id=novel_id,
-                title=_JOBS[job_key].get("title", ""),
-                message="이미 파이프라인 작업이 진행 중입니다",
-                queue_stats=get_queue_stats(),
-                loop_running=is_loop_running(),
-            )
+            existing = _JOBS[job_key]
+            # 재시작 후 중단/완료 처리된 항목은 재제출 허용
+            if existing["status"] not in ("중단", "완료"):
+                return StartPipelineResponse(
+                    ok=True,
+                    source=source,
+                    novel_id=novel_id,
+                    title=existing.get("title", ""),
+                    message="이미 파이프라인 작업이 진행 중입니다",
+                    queue_stats=get_queue_stats(),
+                    loop_running=is_loop_running(),
+                )
         _JOBS[job_key] = {
             "source": source,
             "novel_id": novel_id,
@@ -447,6 +712,7 @@ async def start_pipeline(req: StartPipelineRequest):
             "message": "",
             "started_at": now,
         }
+        _save_jobs_unlocked()
 
     # 4. 백그라운드 실행 후 즉시 응답
     threading.Thread(target=_run_pipeline_job, args=(source, novel_id, bo_table, req.title), daemon=True).start()
@@ -464,19 +730,55 @@ async def start_pipeline(req: StartPipelineRequest):
 
 @router.get("/pipeline/status")
 async def pipeline_status():
-    """파이프라인 상태 조회."""
+    """파이프라인 상태 조회.
+
+    current_job: 진행 중 작업 우선, 없으면 최근 중단 건을 남겨
+    재시작 후에도 작업이 투명하게 사라지지 않게 한다.
+    """
+    active_statuses = {"시작 중", "제목 추출 중", "회차 탐색 중", "수집 중"}
     with _JOBS_LOCK:
         current_job = None
-        for job in _JOBS.values():
-            if job["status"] != "완료":
-                current_job = dict(job)
-                break
+        latest_interrupted = None
+        now = time.time()
+        for key, job in _JOBS.items():
+            # orphan 수집 프로세스가 죽으면 진행 중 표시 제거 (스레드도 재시작으로 소멸)
+            if job.get("status") == "수집 중" and not _collect_process_running(job.get("source") or ""):
+                if job.get("started_at") and now - job["started_at"] > 30:
+                    job["status"] = "중단"
+                    job["message"] = "수집 프로세스가 종료되어 중단되었습니다"
+                    _save_jobs_unlocked()
+            if job.get("status") in active_statuses:
+                if current_job is None:
+                    current_job = dict(job)
+            elif job.get("status") == "중단":
+                latest_interrupted = dict(job)
+        if current_job is None:
+            current_job = latest_interrupted
         jobs = [dict(j) for j in _JOBS.values()]
+    novels = get_novel_status()
+    existing_titles = {n["title"] for n in novels}
+    with _JOBS_LOCK:
+        for job in _JOBS.values():
+            if job.get("status") == "완료":
+                continue
+            jtitle = job.get("title")
+            if jtitle and jtitle not in existing_titles:
+                novels.append({
+                    "id": f"job:{job['novel_id']}",
+                    "title": jtitle,
+                    "saved": 0,
+                    "total": 0,
+                    "status": "연재중",
+                    "queued": True,
+                    "collection_done": False,
+                    "eta_seconds": None,
+                })
+                existing_titles.add(jtitle)
     return {
         "loop_running": is_loop_running(),
         "queue": get_queue_stats(),
         "progress": get_progress(),
-        "novels": get_novel_status(),
+        "novels": novels,
         "current_job": current_job,
         "jobs": jobs,
     }
@@ -485,8 +787,9 @@ async def pipeline_status():
 @router.post("/pipeline/reset")
 async def pipeline_reset(password: str = ""):
     """진행 중인 작업 초기화."""
-    if password != ADMIN_PASSWORD:
+    if not _secret_matches(password):
         return {"ok": False, "message": "비밀번호 오류"}
     with _JOBS_LOCK:
         _JOBS.clear()
+        _save_jobs_unlocked()
     return {"ok": True, "message": "작업이 초기화되었습니다"}
