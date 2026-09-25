@@ -446,3 +446,48 @@ class TestUsageHeaders:
 
         assert _extract_usage_headers({"Content-Type": "application/json"}) == {}
         assert _extract_usage_headers(None) == {}
+
+
+class TestBurnRate:
+    def _seed(self, state, samples, used_mb, monkeypatch, limit_mb=100):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", str(limit_mb))
+        tg.save_state({"date": tg._today(), "bytes": int(used_mb * 1024 * 1024), "chapters": 0, "usage_samples": samples})
+
+    def test_record_sample_should_throttle(self, state, monkeypatch):
+        monkeypatch.setattr(tg, "guard_used_bytes", lambda: (0, "tg_calibrated"))
+        assert tg.record_usage_sample(now=1000.0) is True
+        assert tg.record_usage_sample(now=1000.0 + tg.USAGE_SAMPLE_MIN_INTERVAL_SEC - 1) is False
+        assert tg.record_usage_sample(now=1000.0 + tg.USAGE_SAMPLE_MIN_INTERVAL_SEC + 1) is True
+
+    def test_burn_should_be_critical_on_sustained_spike(self, state, monkeypatch):
+        now = 10_000_000.0
+        limit = 100
+        used = 10.0  # 10% of daily
+        tg.save_state({"date": tg._today(), "bytes": 0, "chapters": 0,
+                       "usage_samples": [[now - 3600, 0], [now - 300, int(limit * 0.05 * 1024 * 1024)]]})
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", str(limit))
+        monkeypatch.setattr(tg, "guard_used_bytes", lambda: (int(used * 1024 * 1024), "tg_calibrated"))
+        out = tg.burn_rates(now=now)
+        assert out["level"] == "critical"
+        assert out["rate_1h"] == 2.4
+
+    def test_burn_should_be_warn_on_slow_burn(self, state, monkeypatch):
+        now = 10_000_000.0
+        limit = 100
+        used = 25.0  # 25% of daily
+        tg.save_state({"date": tg._today(), "bytes": 0, "chapters": 0,
+                       "usage_samples": [
+                           [now - 21600, 0],
+                           [now - 3600, int(limit * 0.18 * 1024 * 1024)],
+                           [now - 1800, int(limit * 0.225 * 1024 * 1024)],
+                           [now - 300, int(limit * 0.24 * 1024 * 1024)],
+                       ]})
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", str(limit))
+        monkeypatch.setattr(tg, "guard_used_bytes", lambda: (int(used * 1024 * 1024), "tg_calibrated"))
+        out = tg.burn_rates(now=now)
+        assert out["level"] == "warn"
+
+    def test_burn_should_be_unknown_without_samples(self, state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "100")
+        tg.save_state({"date": tg._today(), "bytes": 0, "chapters": 0})
+        assert tg.burn_rates(now=10_000_000.0)["level"] == "unknown"

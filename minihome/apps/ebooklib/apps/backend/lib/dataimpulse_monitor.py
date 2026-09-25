@@ -351,6 +351,14 @@ def check_dataimpulse_sync() -> dict:
     except Exception as e:
         logger.debug(f"원시 스냅샷 기록 실패(무시): {e}")
 
+    # 버닝레이트 입력: 사용량 스냅샷(5분 throttle, 24h 링)
+    try:
+        from lib.traffic_guard import record_usage_sample
+
+        record_usage_sample()
+    except Exception as e:
+        logger.debug(f"사용량 스냅샷 기록 실패(무시): {e}")
+
     # 버킷: 팩트 계산+영속(1회), 소비 급증 안전망, 기준선 시딩
     bucket_facts = []
     bucket_ratio = None

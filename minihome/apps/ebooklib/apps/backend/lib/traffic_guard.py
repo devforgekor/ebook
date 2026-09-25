@@ -627,6 +627,78 @@ def guard_used_bytes() -> tuple[int, str]:
 QUOTA_WARN_PCT = 0.80
 QUOTA_HARD_PCT = 0.95
 
+# 버닝레이트(예산 소진 속도) — Google SRE 다중 창 표준을 일일 예산에 적응.
+# burn rate 1 = 하루 동안 예산을 균등 소진. 작은 창과 큰 창이 동시에 넘어야 경보.
+BURN_CRIT_RATE = 2.4   # 1h에 일일 예산 10% (0.10 × 24)
+BURN_WARN_RATE = 1.0   # 6h에 일일 예산 25% (0.25 × 4)
+USAGE_SAMPLE_MIN_INTERVAL_SEC = 240
+USAGE_SAMPLE_MAX_SEC = 86400
+
+
+def _used_at(samples: list, target_ts: float) -> Optional[list]:
+    """target_ts 이전(<=)에서 가장 가까운 샘플 [ts, used]."""
+    best = None
+    for sample in samples:
+        if sample[0] <= target_ts:
+            best = sample
+        else:
+            break
+    return best
+
+
+def record_usage_sample(now: Optional[float] = None) -> bool:
+    """사용량 스냅샷을 24h 링에 기록(최소 간격 throttle). 버닝레이트 계산 입력."""
+    lock = _state_lock()
+    try:
+        state = load_state()
+        t = now if now is not None else time.time()
+        samples = state.get('usage_samples') or []
+        if samples and t - samples[-1][0] < USAGE_SAMPLE_MIN_INTERVAL_SEC:
+            return False
+        used, _ = guard_used_bytes()
+        samples.append([t, used])
+        cutoff = t - USAGE_SAMPLE_MAX_SEC
+        state['usage_samples'] = [s for s in samples if s[0] >= cutoff]
+        save_state(state)
+        return True
+    finally:
+        _state_unlock(lock)
+
+
+def burn_rates(now: Optional[float] = None) -> dict:
+    """다중 창 버닝레이트 → 단계(ok/warn/critical). 표본 부족 시 unknown."""
+    state = load_state()
+    samples = sorted(state.get('usage_samples') or [], key=lambda s: s[0])
+    limit = daily_limit_bytes()
+    t = now if now is not None else time.time()
+    out: dict = {"level": "unknown", "rate_1h": None, "rate_6h": None}
+    if not samples or limit <= 0:
+        return out
+    used, _ = guard_used_bytes()
+
+    def rate(window_sec: float) -> Optional[float]:
+        past = _used_at(samples, t - window_sec)
+        if past is None:
+            return None
+        consumed = max(0, used - past[1])
+        return (consumed / limit) / (window_sec / 86400)
+
+    r1, r1s = rate(3600), rate(300)
+    r6, r6s = rate(21600), rate(1800)
+    out.update(
+        {
+            "rate_1h": round(r1, 2) if r1 is not None else None,
+            "rate_6h": round(r6, 2) if r6 is not None else None,
+        }
+    )
+    if r1 is not None and r1s is not None and r1 >= BURN_CRIT_RATE and r1s >= BURN_CRIT_RATE:
+        out["level"] = "critical"
+    elif r6 is not None and r6s is not None and r6 >= BURN_WARN_RATE and r6s >= BURN_WARN_RATE:
+        out["level"] = "warn"
+    else:
+        out["level"] = "ok"
+    return out
+
 
 def forecast_used_mb(at: Optional[float] = None) -> Optional[float]:
     """현재 속도로 하루를 채울 때의 예상 사용량(MB). 1h 미만 경과 시 None.
@@ -706,6 +778,7 @@ def summary_calibrated() -> dict:
     api_mb = api_daily_used_mb()
     used_effective, source = effective_used_bytes()
     used_guard, guard_source = guard_used_bytes()
+    burn = burn_rates()
     factor = get_calibration_factor()
     return {
         "daily_limit_mb": get_daily_limit_mb(),
@@ -714,6 +787,9 @@ def summary_calibrated() -> dict:
         "used_mb_guard": round(used_guard / (1024 * 1024), 2),
         "used_mb_guard_source": guard_source,
         "quota_level": quota_level(),
+        "burn_level": burn["level"],
+        "burn_rate_1h": burn["rate_1h"],
+        "burn_rate_6h": burn["rate_6h"],
         "forecast_mb": (
             round(forecast_used_mb(), 2) if forecast_used_mb() is not None else None
         ),
