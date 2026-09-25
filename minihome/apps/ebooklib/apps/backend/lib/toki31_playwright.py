@@ -437,6 +437,7 @@ class Toki31Collector:
         self._response_event = asyncio.Event()
         self._consecutive_failures = 0
         self._traffic_total = 0  # 프록시로 받은 총 응답 바이트 (실측, 수명 누적)
+        self._traffic_by_type: dict = {}  # resource_type → 누적 바이트 (절감 A/B 분석용)
         self._is_cold = True  # 브라우저 첫 로드 여부 (JS 번들 전체 다운로드 → 상한 높게)
         self._wasm_cache = {}  # ad_guard_bg.wasm url → bytes (챕터 간 재서빙)
         self._js_cache = {}  # JS 청크 url → bytes (검증: 동일 URL 내용 안정)
@@ -514,6 +515,8 @@ class Toki31Collector:
                 else:
                     size = len(await response.body())
                 self._traffic_total += size
+                rtype = getattr(response, "resource_type", None) or "other"
+                self._traffic_by_type[rtype] = self._traffic_by_type.get(rtype, 0) + size
                 # 응답별 트래픽 상세 로깅 (50KB 이상 또는 API 응답)
                 if size > 50 * 1024 or '/api/' in response.url:
                     logger.info(
@@ -804,6 +807,15 @@ def get_traffic_total_bytes() -> int:
     return _collector._traffic_total if _collector else 0
 
 
+def get_traffic_breakdown() -> dict:
+    """resource_type별 누적 바이트 (내림차순). 절감 레버 분석용(OEC)."""
+    if not _collector:
+        return {}
+    return dict(
+        sorted(_collector._traffic_by_type.items(), key=lambda kv: kv[1], reverse=True)
+    )
+
+
 def get_collector_state() -> dict:
     """현재 collector 상태 (트래픽 분석용)."""
     if not _collector:
@@ -811,6 +823,7 @@ def get_collector_state() -> dict:
     return {
         "is_cold": _collector._is_cold,
         "traffic_total": _collector._traffic_total,
+        "traffic_by_type": get_traffic_breakdown(),
         "js_cache": len(_collector._js_cache),
         "wasm_cache": len(_collector._wasm_cache),
         "js_hits": len(_collector._js_cache_hits),
