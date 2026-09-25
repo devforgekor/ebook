@@ -21,7 +21,10 @@ from lib.toki31_playwright import (
     _chromium_args,
     _inject_proxy_auth,
     _request_headers,
+    build_http_request,
     ensure_dataimpulse_inject_proxy,
+    fetch_content_api_http,
+    http_first_enabled,
     playwright_proxy_config,
 )
 
@@ -180,3 +183,56 @@ class TestLevel1Tuning:
     def test_cdp_block_should_apply_when_enabled(self, monkeypatch):
         monkeypatch.setenv("EBOOK_TOK31_CDP_BLOCK", "1")
         assert _cdp_blocked_urls() == list(CDP_BLOCKED_URLS)
+
+
+class TestHttpFirst:
+    def test_http_first_should_be_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("EBOOK_TOK31_HTTP_FIRST", raising=False)
+        assert http_first_enabled() is False
+
+    def test_http_first_should_enable(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_TOK31_HTTP_FIRST", "1")
+        assert http_first_enabled() is True
+
+    def test_build_http_request_should_add_cookie_and_method(self):
+        spec = {"url": "https://x/api/novel-content", "method": "POST", "post_data": '{"a":1}'}
+        req = build_http_request(spec, "sid=abc")
+        assert req["url"].endswith("/api/novel-content")
+        assert req["method"] == "POST"
+        assert req["headers"]["Cookie"] == "sid=abc"
+        assert req["headers"]["Content-Type"] == "application/json"
+        assert req["data"] == '{"a":1}'
+
+    def test_fetch_should_return_none_without_spec(self):
+        import asyncio
+
+        assert asyncio.run(fetch_content_api_http(None, "sid=abc")) is None
+        assert asyncio.run(fetch_content_api_http({}, "sid=abc")) is None
+
+    def test_fetch_should_return_payload_on_success(self):
+        import asyncio
+
+        def fake_call(req, proxy_url, timeout):
+            return {"ok": True, "payload": "ENCODED"}
+
+        out = asyncio.run(
+            fetch_content_api_http(
+                {"url": "https://x/api/novel-content", "method": "GET"},
+                "sid=abc",
+                caller=fake_call,
+            )
+        )
+        assert out == {"ok": True, "payload": "ENCODED"}
+
+    def test_fetch_should_fall_back_on_error_or_invalid(self):
+        import asyncio
+
+        def boom(req, proxy_url, timeout):
+            raise RuntimeError("proxy down")
+
+        def not_ok(req, proxy_url, timeout):
+            return {"ok": False}
+
+        spec = {"url": "https://x/api/novel-content", "method": "GET"}
+        assert asyncio.run(fetch_content_api_http(spec, "sid=abc", caller=boom)) is None
+        assert asyncio.run(fetch_content_api_http(spec, "sid=abc", caller=not_ok)) is None

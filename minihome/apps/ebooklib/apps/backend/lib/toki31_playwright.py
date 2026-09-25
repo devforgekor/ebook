@@ -140,6 +140,67 @@ def _cdp_blocked_urls() -> list:
     return list(CDP_BLOCKED_URLS) if _env_on(_CDP_BLOCK_ENV, default=False) else []
 
 
+# ── 레벨3(조사): novel-content API 직접 호출(브라우저 제거) — 기본 OFF ──
+# 브라우저가 이미 관측한 요청 스펙(spec)+쿠키를 재사용해 실패 시에만 폴백한다.
+_HTTP_FIRST_ENV = "EBOOK_TOK31_HTTP_FIRST"
+
+
+def http_first_enabled() -> bool:
+    return _env_on(_HTTP_FIRST_ENV, default=False)
+
+
+def build_http_request(spec: dict, cookie: str) -> dict:
+    """관측된 API 스펙 + 쿠키 → HTTP 요청(url/method/headers/data)으로 변환."""
+    headers = dict(MINIMAL_REQUEST_HEADERS)
+    if cookie:
+        headers["Cookie"] = cookie
+    method = (spec.get("method") or "GET").upper()
+    data = spec.get("post_data")
+    if data and "content-type" not in {k.lower() for k in headers}:
+        headers["Content-Type"] = "application/json"
+    return {"url": spec.get("url", ""), "method": method, "headers": headers, "data": data}
+
+
+def _http_call(req: dict, proxy_url: Optional[str], timeout: float) -> dict:
+    """requests로 API 호출(동기) — asyncio.to_thread에서 실행."""
+    import requests
+
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    fn = requests.post if req["method"] == "POST" else requests.get
+    kwargs = {"headers": req["headers"], "proxies": proxies, "timeout": timeout, "verify": False}
+    if req["method"] == "POST":
+        kwargs["data"] = req["data"]
+    resp = fn(req["url"], **kwargs)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def fetch_content_api_http(
+    spec: Optional[dict],
+    cookie: str,
+    proxy_url: Optional[str] = None,
+    timeout: float = 10.0,
+    caller=None,
+) -> Optional[dict]:
+    """novel-content API를 직접 호출해 페이로드 dict 반환(실패 시 None → 브라우저 폴백).
+
+    [WHY] 3MB 렌더 대신 ~24KB JSON 직접 호출로 대역폭을 크게 줄인다(레벨3).
+    스펙/쿠키가 없거나 검증(ok/payload) 실패면 None을 반환해 호출자가 브라우저로 폴백.
+    """
+    if not spec or not spec.get("url"):
+        return None
+    req = build_http_request(spec, cookie)
+    call = caller or _http_call
+    try:
+        data = await asyncio.to_thread(call, req, proxy_url, timeout)
+    except Exception as e:  # noqa: BLE001 — 실패는 폴백 신호
+        logger.debug(f"HTTP 우선 호출 실패(폴백): {e}")
+        return None
+    if isinstance(data, dict) and data.get("ok") and data.get("payload"):
+        return data
+    return None
+
+
 def _parse_proxy_key(value: str):
     """KV 결합 프록시 키 'user:pass@host:port' → (user, pass, host, port)."""
     user = pw = host = port = ""
@@ -494,6 +555,7 @@ class Toki31Collector:
         self._traffic_total = 0  # 프록시로 받은 총 응답 바이트 (실측, 수명 누적)
         self._traffic_by_type: dict = {}  # resource_type → 누적 바이트 (절감 A/B 분석용)
         self._encoding_counts: dict = {}  # content-encoding → 응답 수 (압축 검증)
+        self._content_api_spec: Optional[dict] = None  # 관측된 novel-content 요청 스펙(레벨3)
         self._is_cold = True  # 브라우저 첫 로드 여부 (JS 번들 전체 다운로드 → 상한 높게)
         self._wasm_cache = {}  # ad_guard_bg.wasm url → bytes (챕터 간 재서빙)
         self._js_cache = {}  # JS 청크 url → bytes (검증: 동일 URL 내용 안정)
@@ -609,6 +671,20 @@ class Toki31Collector:
 
         self._page.on("response", _on_response)
 
+        async def _on_request(request):
+            # 레벨3: 브라우저가 관측한 novel-content 요청 스펙을 저장(HTTP 직접 호출 재사용)
+            try:
+                if "/api/novel-content" in request.url:
+                    self._content_api_spec = {
+                        "url": request.url,
+                        "method": request.method,
+                        "post_data": request.post_data,
+                    }
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._page.on("request", _on_request)
+
         # 불필요한 리소스 차단 (image/font/media/stylesheet → abort, 트래픽 절약)
         await self._page.route("**/*", self._block_unnecessary)
         logger.info("toki31 브라우저 시작 완료 (리소스 차단 + 재사용)")
@@ -624,6 +700,41 @@ class Toki31Collector:
             logger.info(f"CDP setBlockedURLs 적용: {urls}")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"CDP setBlockedURLs 실패(무시): {e}")
+
+    async def _content_cookie_header(self) -> str:
+        """현재 브라우저 세션 쿠키 → 'k=v; ...' (HTTP 우선 호출용)."""
+        try:
+            cookies = await self._context.cookies() if self._context else []
+        except Exception:  # noqa: BLE001
+            cookies = []
+        return "; ".join(
+            f"{c.get('name')}={c.get('value')}"
+            for c in cookies
+            if isinstance(c, dict) and c.get("name")
+        )
+
+    def _proxy_url(self) -> Optional[str]:
+        """Playwright 프록시 dict → requests용 URL(user:pass@host:port)."""
+        proxy = self._proxy or {}
+        server = proxy.get("server")
+        if not server:
+            return None
+        user, password = proxy.get("username"), proxy.get("password")
+        if user and password:
+            return server.replace("://", f"://{user}:{password}@", 1)
+        return server
+
+    async def _fetch_content_api_http(self, timeout_ms: int) -> Optional[dict]:
+        """HTTP 우선 시도(기본 OFF) — 스펙/쿠키 없거나 실패면 None(브라우저 폴백)."""
+        if not http_first_enabled() or not self._content_api_spec:
+            return None
+        cookie = await self._content_cookie_header()
+        return await fetch_content_api_http(
+            self._content_api_spec,
+            cookie,
+            self._proxy_url(),
+            timeout=max(5.0, timeout_ms / 1000),
+        )
 
     async def _block_unnecessary(self, route, request):
         """불필요한 리소스 차단 — 이미지/폰트/미디어/CSS 차단, JS만 허용.
@@ -904,6 +1015,7 @@ def get_collector_state() -> dict:
         "traffic_total": _collector._traffic_total,
         "traffic_by_type": get_traffic_breakdown(),
         "encoding_counts": get_encoding_counts(),
+        "content_http_ready": bool(_collector._content_api_spec),
         "js_cache": len(_collector._js_cache),
         "wasm_cache": len(_collector._wasm_cache),
         "js_hits": len(_collector._js_cache_hits),
