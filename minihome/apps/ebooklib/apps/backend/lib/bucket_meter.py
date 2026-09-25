@@ -522,6 +522,40 @@ def aa_report(
     }
 
 
+def daily_reconcile(
+    facts: Sequence[dict], history: Sequence[dict], day: str
+) -> dict:
+    """일별 **확정 API(청구)** 총량과 버킷 롤업을 정산(계획 §8 P6, FOCUS reconcile).
+
+    - `api_billed_mb`: 해당 일 `traffic_history.total_traffic`(지연 반영된 확정값)
+    - `rollup_api_mb`: 버킷 `api_mb_delta` 합(수집 구간 귀속)
+    - `gap_mb`: 청구 - 롤업 = 수집 외/미귀속(콜드·모니터·경계 넘김 등)
+    - 같은 일자로 귀속: 팩트 `to_ts`(UTC) 기준, 경계 넘김은 partial로 계수
+    """
+    day_facts = [f for f in facts if _utc_date(f.get("to_ts") or 0) == day]
+    api_billed = 0.0
+    for entry in history or []:
+        if str(entry.get("group_date", "")).startswith(day):
+            api_billed = float(entry.get("total_traffic", 0) or 0) / _MB
+            break
+    rollup = sum(float(f.get("api_mb_delta") or 0) for f in day_facts)
+    tg_mb = sum(int(f.get("tg_bytes_delta") or 0) for f in day_facts) / _MB
+    return {
+        "day": day,
+        "api_billed_mb": round(api_billed, 3),
+        "rollup_api_mb": round(rollup, 3),
+        "tg_mb": round(tg_mb, 3),
+        "r_day": round(api_billed / tg_mb, 4) if (tg_mb > 0 and api_billed > 0) else None,
+        "gap_mb": round(api_billed - rollup, 3),
+        "gap_pct": round((api_billed - rollup) / api_billed * 100, 1) if api_billed > 0 else None,
+        "n_facts": len(day_facts),
+        "ok_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_OK),
+        "late_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_LATE),
+        "partial_count": sum(1 for f in day_facts if f.get("quality") == QUALITY_PARTIAL),
+        "api_settled": api_billed > 0,
+    }
+
+
 def load_facts(path: str | Path = DEFAULT_OUT_PATH) -> list[dict]:
     """append-only fact JSONL 로드(손상 라인은 건너뜀)."""
     target = Path(path)
@@ -814,6 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="config_hash 두 개 OEC 비교",
     )
     parser.add_argument("--aa", action="store_true", help="동일 config 전/후반 A/A 변동성")
+    parser.add_argument("--reconcile", metavar="YYYY-MM-DD", help="일별 API↔버킷 정산")
     args = parser.parse_args(argv)
 
     if args.size < 1:
@@ -842,6 +877,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.aa:
         print(json.dumps(aa_report(facts), ensure_ascii=False, indent=2))
+        return 0
+    if args.reconcile:
+        try:
+            state = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        history = [
+            {"group_date": d, "total_traffic": mb * _MB}
+            for d, mb in (state.get("api_history") or {}).items()
+        ]
+        print(
+            json.dumps(
+                daily_reconcile(facts, history, args.reconcile),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     summary = report(facts)
     if args.out:

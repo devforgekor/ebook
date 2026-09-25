@@ -397,6 +397,27 @@ def check_dataimpulse_sync() -> dict:
     except Exception as e:
         logger.debug(f"버킷 안전망 평가 실패(무시): {e}")
 
+    # P6 정합: 일별 확정 API ↔ 버킷 롤업 정산(콜드/경계/미귀속 gap 가시화)
+    reconcile_result = None
+    try:
+        from lib.bucket_meter import daily_reconcile
+        from lib.traffic_guard import get_prev_day
+
+        history = api_data.get('traffic_history') or []
+        day = (get_prev_day() or {}).get('date')
+        if not day and history:
+            day = str(history[-1].get('group_date', ''))[:10]
+        if day:
+            reconcile_result = daily_reconcile(bucket_facts, history, day)
+            logger.info(
+                f"P6 정합({day}): API={reconcile_result['api_billed_mb']}MB "
+                f"rollup={reconcile_result['rollup_api_mb']}MB "
+                f"gap={reconcile_result['gap_mb']}MB TG={reconcile_result['tg_mb']}MB "
+                f"r={reconcile_result['r_day']}"
+            )
+    except Exception as e:
+        logger.debug(f"P6 정합 실패(무시): {e}")
+
     # 보정계수: 버킷 중앙값 r(전달) 우선, 없으면 전일 총량 (1일 1회)
     try:
         _maybe_calibrate_daily(api_data, bucket_ratio=bucket_ratio)
@@ -420,6 +441,17 @@ def check_dataimpulse_sync() -> dict:
         state["api_today_max_mb"] = max(
             float(state.get("api_today_max_mb") or 0), today_mb
         )
+    # P6/P5: 확정 API 일별 총량 히스토리(최근 90일) + 최근 정합 결과
+    hist = state.setdefault("api_history", {})
+    for entry in (api_data.get("traffic_history") or []):
+        gd = str(entry.get("group_date", ""))[:10]
+        if gd:
+            hist[gd] = round(float(entry.get("total_traffic", 0) or 0) / (1024 * 1024), 3)
+    if len(hist) > 90:
+        for key in sorted(hist)[:-90]:
+            hist.pop(key, None)
+    if reconcile_result is not None:
+        state["last_reconcile"] = reconcile_result
     _save_api_state(state)
     
     return {

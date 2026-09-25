@@ -597,3 +597,41 @@ def test_aa_report_should_flag_variance_over_threshold():
 
     noisy = [_ok_fact("x", 100.0, tg_kb=v, from_ts=float(i)) for i, v in enumerate([100, 100, 100, 130])]
     assert aa_report(noisy, "x")["ok"] is False
+
+
+def test_daily_reconcile_should_compute_gap_and_quality():
+    from lib.bucket_meter import daily_reconcile
+
+    day = "2026-09-23"
+    from datetime import datetime, timezone
+
+    ts = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc).timestamp()
+    facts = [
+        {
+            "to_ts": ts,
+            "quality": "ok",
+            "api_mb_delta": 30.0,
+            "tg_bytes_delta": 16 * 1024 * 1024,
+        },
+        {
+            "to_ts": ts,
+            "quality": "partial",
+            "api_mb_delta": 5.0,
+            "tg_bytes_delta": 3 * 1024 * 1024,
+        },
+        {
+            "to_ts": datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc).timestamp(),
+            "quality": "ok",
+            "api_mb_delta": 99.0,
+            "tg_bytes_delta": 50 * 1024 * 1024,
+        },
+    ]
+    history = [{"group_date": "2026-09-23T00:00:00Z", "total_traffic": 40 * 1024 * 1024}]
+    out = daily_reconcile(facts, history, day)
+    assert out["api_billed_mb"] == 40.0
+    assert out["rollup_api_mb"] == 35.0
+    assert out["gap_mb"] == 5.0
+    assert out["tg_mb"] == 19.0
+    assert out["n_facts"] == 2
+    assert out["ok_count"] == 1 and out["partial_count"] == 1
+    assert out["api_settled"] is True
