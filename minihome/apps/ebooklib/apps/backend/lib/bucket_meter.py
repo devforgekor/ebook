@@ -450,9 +450,8 @@ def _metric_median(facts: Sequence[dict], metric: str) -> float | None:
             vals.append(f["api_mb_delta"] * _KB / chapters)
         elif metric == "tg_kb_per_chapter" and chapters and f["tg_bytes_delta"] > 0:
             vals.append(f["tg_bytes_delta"] / _KB / chapters)
-        elif metric == "r":
-            if f.get("r"):
-                vals.append(f["r"])
+        elif metric == "r" and f.get("r"):
+            vals.append(f["r"])
     return round(median(vals), 4) if vals else None
 
 
