@@ -830,3 +830,36 @@ class TestKakaoSearch:
         assert out["status"] == "완결"
         assert out["source_url"].endswith("/42")
         assert out["source"] == "official:kakao"
+
+
+class TestKakaoMediaPreference:
+    def test_should_prefer_web_novel_over_webtoon(self):
+        from services import metadata_search as ms
+
+        class _Resp:
+            def __init__(self, d): self.status_code=200; self._d=d
+            def json(self): return self._d
+
+        class _Req:
+            def get(self, url, params=None, **k):
+                if "search/series" in url:
+                    return _Resp({"result": {"list": [
+                        {"type": "SERIES", "series_id": 1, "title": "흑백무제", "authors": "작가T",
+                         "state": "ST61", "thumbnail": "t", "category": "웹툰", "sub_category": "무협"},
+                        {"type": "SERIES", "series_id": 2, "title": "흑백무제", "authors": "작가N",
+                         "state": "ST61", "thumbnail": "t", "category": "웹소설", "sub_category": "무협"},
+                    ]}})
+                if "product/list" in url:
+                    sid = params.get("series_id")
+                    return _Resp({"result": {"total_count": 69 if sid == 1 else 1527}})
+                return _Resp({"result": {}})
+
+        import sys as _s
+        real = _s.modules.get("requests"); _s.modules["requests"] = _Req()
+        try:
+            out = ms.search_kakao("흑백무제", want_media="novel")
+        finally:
+            if real is None: _s.modules.pop("requests", None)
+            else: _s.modules["requests"] = real
+        assert out["source_url"].endswith("/2")
+        assert out["total_chapters"] == 1527

@@ -217,15 +217,21 @@ def _kakao_get_via_browser(url: str, params: dict, timeout: float = 12.0):
         return None
 
 
-def search_kakao(title: str, timeout: float = 15.0) -> Optional[dict]:
+def search_kakao(title: str, timeout: float = 15.0, want_media: Optional[str] = None) -> Optional[dict]:
     """카카오페이지 검색 → 정규화 메타(작가/총화수/상태/표지)."""
     data = _kakao_get(
         KAKAO_SEARCH_API, {"keyword": title, "category": "all", "sort": "ACCURACY", "page": 0}, timeout
     )
     items = ((data or {}).get("result") or {}).get("list") or []
-    for it in items:
-        if it.get("type") != "SERIES" or not title_matches(title, it.get("title", "")):
-            continue
+    matches = [
+        it for it in items
+        if it.get("type") == "SERIES" and title_matches(title, it.get("title", ""))
+    ]
+    # [WHY] 같은 제목이 웹툰/웹소설로 공존한다. 미디어 타입 힌트가 'novel'이면
+    # 카테고리가 웹소설인 항목을 우선한다(총화수 단위가 달라 오염 방지).
+    if want_media == "novel":
+        matches.sort(key=lambda it: 0 if (it.get("category") == "웹소설") else 1)
+    for it in matches:
         sid = it.get("series_id")
         total = None
         prod = _kakao_get(KAKAO_PRODUCT_API, {"series_id": sid, "page": 0, "size": 1}, timeout)
@@ -251,7 +257,7 @@ def search_kakao(title: str, timeout: float = 15.0) -> Optional[dict]:
     return None
 
 
-def find_official(title: str) -> Optional[dict]:
+def find_official(title: str, want_media: Optional[str] = None) -> Optional[dict]:
     """제목으로 공식 메타 검색 — 네이버 시리즈 → 문피아 → 카카오 → (접근 가능 시) 기타.
 
     Returns: metadata_official.parse_platform 형태의 dict 또는 None.
@@ -265,7 +271,7 @@ def find_official(title: str) -> Optional[dict]:
     if meta:
         return meta
     # 3차: 카카오페이지(BFF API — Playwright 폴백 필요할 수 있음)
-    meta = search_kakao(title)
+    meta = search_kakao(title, want_media=want_media)
     if meta:
         return meta
     # 4차: 리디/조아라는 접근 차단이 잦아 시도만 하고 스킵

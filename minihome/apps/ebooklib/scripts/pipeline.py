@@ -1624,7 +1624,7 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
             try:
                 from services.metadata_search import find_official
 
-                found = find_official(meta.get('title', novel_dir.name))
+                found = find_official(meta.get('title', novel_dir.name), want_media=meta.get('media_type'))
                 if found and found.get('source_url'):
                     official_url = found['source_url']
                     official_meta = found
