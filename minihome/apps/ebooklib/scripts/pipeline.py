@@ -1182,7 +1182,7 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     (loop는 소스별로 순회하므로 한 소스의 중단이 다른 소스를 막지 않음)
     """
     from lib.sources import get_traffic_limited
-    from lib.traffic_guard import reset_if_new_day, is_exceeded_calibrated, add_bytes, summary, summary_calibrated
+    from lib.traffic_guard import reset_if_new_day, is_exceeded_calibrated, add_bytes, summary, summary_calibrated, quota_level
     from lib.toki31_playwright import get_traffic_total_bytes, get_collector_state
 
     # 트래픽 가드 적용 여부 — 특정 소스 필터 시 그 소스가 유료 프록시인지에 따라.
@@ -1201,6 +1201,13 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
             f"— 자정까지 {source_filter or '유료 소스'} 중단 (queue {len(_load_queue())}건 보존)"
         )
         return {"processed": 0, "errors": [], "remaining": len(_load_queue()), "traffic_exceeded": True}
+
+    if traffic_limited and quota_level() == "warn":
+        s_warn = summary_calibrated()
+        log.warning(
+            f"  ⚠️ 일일 트래픽 한도 근접 ({s_warn.get('used_mb_guard')}MB/{s_warn['daily_limit_mb']}MB, "
+            f"계수 {s_warn['calibration_factor']}x, source={s_warn.get('used_mb_guard_source')})"
+        )
 
     full_queue = _load_queue()
     if not full_queue:

@@ -335,6 +335,16 @@ def check_dataimpulse_sync() -> dict:
     state.setdefault("comparisons", []).append(comparison)
     # 최근 100개만 유지
     state["comparisons"] = state["comparisons"][-100:]
+    # [WHY] API 오늘값은 청크 갱신으로 하향 튐 → 일중 최대값(단조 봉투) 유지.
+    # 소비처: traffic_guard.api_daily_used_mb (한도 판정 과소추정 방지)
+    today_mb = float(api_today.get("total_mb") or 0)
+    if state.get("api_today_date") != api_today.get("date"):
+        state["api_today_date"] = api_today.get("date")
+        state["api_today_max_mb"] = today_mb
+    else:
+        state["api_today_max_mb"] = max(
+            float(state.get("api_today_max_mb") or 0), today_mb
+        )
     _save_api_state(state)
     
     return {

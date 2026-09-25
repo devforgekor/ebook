@@ -27,18 +27,16 @@ API_STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/dataimpulse_api_s
 
 DEFAULT_DAILY_LIMIT_MB = 200
 
-# 기본 보정 계수 (API 측정 / TG 측정)
-# [WHY] 2026-09-23 실측: 구 monitor가 프록시로 대시보드를 로드해 자체 트래픽을
-# 만들어 1.59로 부풀려졌다. monitor를 공식 API로 교체한 뒤 측정한 실제 비율은
-# API/TG ≈ 0.75~0.86 (API < TG). TG가 압축 해제 본문까지 계상해 과다측정하기 때문.
-DEFAULT_CALIBRATION_FACTOR = 0.85
-MIN_CALIBRATION_FACTOR = 0.5
+# 기본 보정 계수 (API 과금 / TG 로컬 측정)
+# [WHY] 2026-09-25 확정: 로컬 TG 과소 측정 → API/TG > 1 (실측 1.96, EWMA 1.8051).
+# 과금은 wire 바이트(요청+응답, 압축)인데 TG는 응답 바디만 계상한다.
+# 상태 유실 시에는 안전측(과대) 기본값 — 과소 추정은 한도 초과(과금)로 이어진다.
+DEFAULT_CALIBRATION_FACTOR = 2.0
+MIN_CALIBRATION_FACTOR = 1.0
 MAX_CALIBRATION_FACTOR = 3.0
 
 # EWMA 보정 계수 설정
 CALIBRATION_ALPHA = 0.3           # EWMA 가중치 (0.2~0.4, 최근 3~4샘플 반영)
-CALIBRATION_MIN = 0.5             # 최소 계수 (API < TG 관측 허용)
-CALIBRATION_MAX = 3.0             # 최대 계수 (비정상 차단)
 CALIBRATION_CHANGE_WARN_PCT = 20  # 급변 경고 임계치 (%)
 
 # SPC (Statistical Process Control) 설정
@@ -209,25 +207,6 @@ def increment_check_count() -> int:
         _state_unlock(lock)
 
 
-def _load_calibration_factor() -> float:
-    """API 비교 데이터에서 보정 계수 로드 (최신 비교 기준)."""
-    try:
-        if API_STATE_FILE.exists():
-            data = json.loads(API_STATE_FILE.read_text(encoding='utf-8'))
-            comparisons = data.get('comparisons', [])
-            if comparisons:
-                latest = comparisons[-1]
-                api_mb = latest.get('api_mb', 0)
-                tg_mb = latest.get('tg_mb', 0)
-                if tg_mb > 0:
-                    factor = api_mb / tg_mb
-                    # 합리적 범위 클램프
-                    return max(MIN_CALIBRATION_FACTOR, min(MAX_CALIBRATION_FACTOR, factor))
-    except Exception as e:
-        logger.debug(f"보정 계수 로드 실패, 기본값 사용: {e}")
-    return DEFAULT_CALIBRATION_FACTOR
-
-
 def get_calibration_factor() -> float:
     """현재 EWMA 보정 계수 반환 (traffic_state.json에서 로드)."""
     try:
@@ -255,12 +234,12 @@ def _update_calibration_factor_ewma(latest_factor: float) -> float:
         state = load_state()
         prev_ewma = state.get('calibration_factor_ewma')
 
-        latest_clamped = max(CALIBRATION_MIN, min(CALIBRATION_MAX, latest_factor))
+        latest_clamped = max(MIN_CALIBRATION_FACTOR, min(MAX_CALIBRATION_FACTOR, latest_factor))
         if prev_ewma is None:
             new_ewma = latest_clamped
         else:
             new_ewma = CALIBRATION_ALPHA * latest_clamped + (1 - CALIBRATION_ALPHA) * prev_ewma
-        new_ewma = max(CALIBRATION_MIN, min(CALIBRATION_MAX, new_ewma))
+        new_ewma = max(MIN_CALIBRATION_FACTOR, min(MAX_CALIBRATION_FACTOR, new_ewma))
 
         # 중심선 = 이동 EWMA (매 갱신마다 추종 → 정당한 이동은 이상 아님)
         cl = new_ewma
@@ -324,18 +303,6 @@ def _update_calibration_factor_ewma(latest_factor: float) -> float:
         _state_unlock(lock)
 
 
-def get_calibration_factor() -> float:
-    """현재 EWMA 보정 계수 반환 (traffic_state.json에서 로드)."""
-    try:
-        state = load_state()
-        ewma = state.get('calibration_factor_ewma')
-        if ewma is not None:
-            return float(ewma)
-    except Exception:
-        pass
-    return DEFAULT_CALIBRATION_FACTOR
-
-
 def is_calibration_emergency() -> bool:
     """보정 계수 비상 중지 플래그 확인.
     
@@ -389,6 +356,11 @@ def api_daily_used_mb() -> Optional[float]:
         mb = last.get('total_mb')
         if mb is None or (time.time() - ts) > API_FRESH_SEC:
             return None
+        # [WHY] API 오늘값은 비단조·청크(~1.5MB) 갱신 → 일중 최대값(단조 봉투)으로
+        # 하향 튐을 막는다. 같은 날짜의 max만 사용(날짜 경계 오적용 방지).
+        max_mb = data.get('api_today_max_mb')
+        if data.get('api_today_date') == last.get('date') and max_mb is not None:
+            return float(max(float(mb), float(max_mb)))
         return float(mb)
     except Exception:
         return None
@@ -405,15 +377,48 @@ def effective_used_bytes() -> tuple[int, str]:
     return current_bytes_calibrated(), "tg_calibrated"
 
 
+def guard_used_bytes() -> tuple[int, str]:
+    """한도 차단용 보수적 사용량 = max(API 실측, TG×보정).
+
+    [WHY] API는 보고 지연·청크로 순간적으로 실제보다 낮을 수 있다. 차단(안전)은
+    두 추정치의 최대값을 써서 과소 추정으로 인한 한도 초과를 방지한다.
+    """
+    api_mb = api_daily_used_mb()
+    tg_cal = current_bytes_calibrated()
+    if api_mb is None:
+        return tg_cal, "tg_calibrated"
+    api_bytes = int(api_mb * 1024 * 1024)
+    if api_bytes >= tg_cal:
+        return api_bytes, "api"
+    return tg_cal, "tg_calibrated"
+
+
+QUOTA_WARN_PCT = 0.80
+QUOTA_HARD_PCT = 0.95
+
+
+def quota_level() -> str:
+    """예산 단계 — 한도 차단용(보수적) 사용량 기준 ok/warn(80%)/critical(95%)."""
+    used, _ = guard_used_bytes()
+    limit = daily_limit_bytes()
+    if limit <= 0:
+        return "ok"
+    if used >= limit * QUOTA_HARD_PCT:
+        return "critical"
+    if used >= limit * QUOTA_WARN_PCT:
+        return "warn"
+    return "ok"
+
+
 def remaining_bytes_calibrated() -> int:
-    """잔여 바이트 (유효 사용량 기준)."""
-    used, _ = effective_used_bytes()
+    """잔여 바이트 (한도 차단용 보수적 사용량 기준)."""
+    used, _ = guard_used_bytes()
     return max(0, daily_limit_bytes() - used)
 
 
 def is_exceeded_calibrated() -> bool:
-    """일일 한도 초과 여부 — API 실측 우선, TG×보정계수 폴백."""
-    used, _ = effective_used_bytes()
+    """일일 한도 초과 여부 — 보수적(API와 TG×보정 중 큰 값) 기준."""
+    used, _ = guard_used_bytes()
     return used >= daily_limit_bytes()
 
 
@@ -424,16 +429,20 @@ def summary_calibrated() -> dict:
     used_tg_cal = current_bytes_calibrated()
     api_mb = api_daily_used_mb()
     used_effective, source = effective_used_bytes()
+    used_guard, guard_source = guard_used_bytes()
     factor = get_calibration_factor()
     return {
         "daily_limit_mb": get_daily_limit_mb(),
         "used_mb": round(used_effective / (1024 * 1024), 2),
         "used_mb_source": source,  # "api" | "tg_calibrated"
+        "used_mb_guard": round(used_guard / (1024 * 1024), 2),
+        "used_mb_guard_source": guard_source,
+        "quota_level": quota_level(),
         "used_mb_api": round(api_mb, 2) if api_mb is not None else None,
         "used_mb_tg_calibrated": round(used_tg_cal / (1024 * 1024), 2),
         "used_mb_raw": round(used_raw / (1024 * 1024), 2),
-        "remaining_mb": round(max(0, limit - used_effective) / (1024 * 1024), 2),
-        "exceeded": used_effective >= limit,
+        "remaining_mb": round(max(0, limit - used_guard) / (1024 * 1024), 2),
+        "exceeded": used_guard >= limit,
         "chapters": int(load_state().get('chapters', 0)),
         "calibration_factor": round(factor, 3),
     }

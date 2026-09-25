@@ -141,3 +141,95 @@ class TestDataImpulseCompare:
         assert out["diff_mb"] == 20.0
         assert out["diff_pct"] == 20.0
         assert out["tg_chapters"] == 10
+
+
+def _write_api_state(path, total_mb, max_mb=None, date=None, age_sec=0):
+    import json
+    import time
+
+    date = date or tg._today()
+    path.write_text(
+        json.dumps(
+            {
+                "last_check": time.time() - age_sec,
+                "last_api_data": {"date": date, "total_mb": total_mb},
+                "api_today_date": date,
+                "api_today_max_mb": max_mb if max_mb is not None else total_mb,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def api_state(tmp_path, monkeypatch):
+    p = tmp_path / "dataimpulse_api_state.json"
+    monkeypatch.setattr(tg, "API_STATE_FILE", p)
+    return p
+
+
+class TestGapSafety:
+    def test_calibration_defaults_should_not_underestimate(self):
+        # 방향 확정: API > TG → 계수는 1.0 이상, 기본값은 안전측(과대)
+        assert tg.MIN_CALIBRATION_FACTOR >= 1.0
+        assert tg.DEFAULT_CALIBRATION_FACTOR >= 1.0
+
+    def test_api_daily_should_use_monotonic_max(self, api_state):
+        _write_api_state(api_state, total_mb=0.4, max_mb=0.6)
+        assert tg.api_daily_used_mb() == 0.6
+
+    def test_api_daily_should_return_none_when_stale(self, api_state):
+        _write_api_state(api_state, total_mb=0.4, age_sec=tg.API_FRESH_SEC + 1)
+        assert tg.api_daily_used_mb() is None
+
+    def test_guard_should_take_max_of_api_and_tg(self, state, api_state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "10")
+        tg.save_state(
+            {
+                "date": tg._today(),
+                "bytes": 512 * 1024,
+                "chapters": 1,
+                "calibration_factor_ewma": 2.0,
+            }
+        )
+        _write_api_state(api_state, total_mb=0.6)
+        used, src = tg.guard_used_bytes()
+        assert src == "tg_calibrated"  # 1.0MB(TG cal) > 0.6MB(API)
+        assert used == 1024 * 1024
+
+    def test_guard_should_prefer_api_when_larger(self, state, api_state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "10")
+        tg.save_state(
+            {
+                "date": tg._today(),
+                "bytes": 100 * 1024,
+                "chapters": 1,
+                "calibration_factor_ewma": 1.0,
+            }
+        )
+        _write_api_state(api_state, total_mb=5.0)
+        used, src = tg.guard_used_bytes()
+        assert src == "api"
+        assert used == 5 * 1024 * 1024
+
+    def test_quota_level_thresholds(self, state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "1")
+        monkeypatch.setattr(tg, "API_STATE_FILE", state.parent / "none.json")
+        tg.save_state(
+            {
+                "date": tg._today(),
+                "bytes": int(0.85 * 1024 * 1024),
+                "chapters": 1,
+                "calibration_factor_ewma": 1.0,
+            }
+        )
+        assert tg.quota_level() == "warn"
+        tg.save_state(
+            {
+                "date": tg._today(),
+                "bytes": int(0.96 * 1024 * 1024),
+                "chapters": 1,
+                "calibration_factor_ewma": 1.0,
+            }
+        )
+        assert tg.quota_level() == "critical"
