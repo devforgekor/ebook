@@ -254,3 +254,30 @@ class TestInjectProxyUrl:
         monkeypatch.setattr(tp, "playwright_proxy_config", lambda env=None: None)
         collector = tp.Toki31Collector.__new__(tp.Toki31Collector)
         assert collector._proxy_url() is None
+
+
+    def test_proxy_country_should_default_kr(self, monkeypatch):
+        import lib.toki31_playwright as tp
+
+        monkeypatch.delenv("EBOOK_TOK31_PROXY_COUNTRY", raising=False)
+        assert tp.proxy_country() == "kr"
+        monkeypatch.setenv("EBOOK_TOK31_PROXY_COUNTRY", "jp")
+        assert tp.proxy_country() == "jp"
+
+    def test_proxy_config_should_use_country(self, monkeypatch):
+        import lib.toki31_playwright as tp
+
+        captured = {}
+
+        def fake_inject(user, pw, host, port):
+            captured["user"] = user
+            return "http://127.0.0.1:1"
+
+        monkeypatch.setattr(tp, "ensure_dataimpulse_inject_proxy", fake_inject)
+        monkeypatch.setenv("EBOOK_TOK31_PROXY_COUNTRY", "jp")
+        cfg = tp.playwright_proxy_config(
+            env={"DATAIMPULSE_USER": "acct", "DATAIMPULSE_PASS": "pw",
+                 "DATAIMPULSE_HOST": "h", "DATAIMPULSE_PORT": "1"}
+        )
+        assert cfg == {"server": "http://127.0.0.1:1"}
+        assert captured["user"] == "acct__cr.jp"

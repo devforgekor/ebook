@@ -51,6 +51,35 @@ _last_api_refresh = [0.0]
 API_REFRESH_SEC = 300
 
 
+def _refresh_official_feed() -> None:
+    """30분 간격으로 공식 피드(t.me/toki1234)를 읽어 후보 도메인 등록 + 점검 감지.
+
+    [WHY] 도메인·점검 공지는 텔레그램에만 올라온다. 후보 도메인은 등록만 하고
+    (자동 전환은 헬스체크가 결정), 점검 중이면 toki31 수집을 건너뛴다(유료 낭비 방지).
+    피드 조회 실패는 아무것도 차단하지 않는다(fail-open).
+    """
+    now = time.time()
+    if now - _last_feed_check[0] < FEED_CHECK_INTERVAL_SEC:
+        return
+    _last_feed_check[0] = now
+    try:
+        from lib.official_feed import fetch_feed, merge_candidates
+
+        feed = fetch_feed()
+        if feed is None:
+            _feed_maintenance[0] = None
+            return
+        added = merge_candidates(feed.get("domains") or [], "toki31")
+        _feed_maintenance[0] = bool(feed.get("maintenance"))
+        if added:
+            log.warning(f"공식 피드: toki31 후보 도메인 {added}건 추가")
+        if _feed_maintenance[0]:
+            log.warning(f"⚠️ 공식 공지 점검/중단 감지 (toki31 수집 일시 건너뜀) — "
+                        f"{feed.get('last_message','')[:120]}")
+    except Exception as e:
+        log.debug(f"공식 피드 갱신 skip: {e}")
+
+
 def _refresh_dataimpulse_periodic() -> None:
     """5분 간격으로 DataImpulse API를 갱신 (idle 시에도 오늘값 신선도 유지)."""
     now = time.time()
@@ -282,7 +311,10 @@ def _add_to_dlq(item: dict, error: str) -> None:
 # ============================================================
 
 DOMAIN_CHECK_INTERVAL_SEC = 1800  # 30분 간격
+FEED_CHECK_INTERVAL_SEC = 1800    # 30분 간격 (공식 주소/점검 피드)
 _last_domain_check = [0.0]
+_last_feed_check = [0.0]
+_feed_maintenance = [None]  # True/False/None(미확인)
 
 
 def _probe_bookto31(base: str) -> Optional[bool]:
@@ -2562,6 +2594,9 @@ def main():
                 # DataImpulse API 주기 갱신 (일일 한도 SSOT 신선도 유지)
                 _refresh_dataimpulse_periodic()
 
+                # 공식 주소/점검 피드 갱신 (후보 도메인 등록 + 점검 시 toki31 스킵)
+                _refresh_official_feed()
+
                 # 비상 중지 확인 — (a) 보정계수 급변 5연속, (b) 버킷 소비 급증 5연속
                 try:
                     from lib.traffic_guard import is_calibration_emergency, is_bucket_anomaly_stop
@@ -2621,6 +2656,10 @@ def main():
                 cycle_remaining = 0
                 traffic_exceeded_any = False
                 for src in sources:
+                    # 공식 공지 점검 중에는 toki31(유료) 수집 건너뜀 — 낭비 방지
+                    if src == "toki31" and _feed_maintenance[0]:
+                        log.info("  ⏭ toki31 공식 점검 공지 — 이번 사이클 수집 건너뜀")
+                        continue
                     # blocking=False: 다른 프로세스가 같은 소스 collect 중이면
                     # skip — loop가 한 소스 락에 묶여 다른 소스/사이클을 멈추지 않음
                     result = run_collect(limit=1, source_filter=src, blocking=False)

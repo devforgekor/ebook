@@ -143,6 +143,13 @@ def _cdp_blocked_urls() -> list:
 # ── 레벨3(조사): novel-content API 직접 호출(브라우저 제거) — 기본 OFF ──
 # 브라우저가 이미 관측한 요청 스펙(spec)+쿠키를 재사용해 실패 시에만 폴백한다.
 _HTTP_FIRST_ENV = "EBOOK_TOK31_HTTP_FIRST"
+# 프록시 exit 국가 — DataImpulse __cr.<cc>. 기본 KR(사이트 타깃).
+# [WHY] KR exit가 SNI/ISP 차단에 걸릴 때 타국가로 우회 가능(C안 실험).
+_PROXY_COUNTRY_ENV = "EBOOK_TOK31_PROXY_COUNTRY"
+
+
+def proxy_country() -> str:
+    return (os.getenv(_PROXY_COUNTRY_ENV) or "kr").strip().lower()
 
 
 def http_first_enabled() -> bool:
@@ -426,7 +433,7 @@ def playwright_proxy_config(env: Optional[dict] = None) -> Optional[dict]:
     if not user or not password:
         return None
     if "__cr." not in user:
-        user = user + "__cr.kr"
+        user = user + f"__cr.{proxy_country()}"
     server = ensure_dataimpulse_inject_proxy(user, password, host, port)
     return {"server": server}
 

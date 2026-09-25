@@ -491,3 +491,55 @@ class TestBurnRate:
         monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "100")
         tg.save_state({"date": tg._today(), "bytes": 0, "chapters": 0})
         assert tg.burn_rates(now=10_000_000.0)["level"] == "unknown"
+
+
+class TestOfficialFeed:
+    SAMPLE = '''
+    <div class="tgme_widget_message_text">서버 점검중입니다, 완료되면 공지드리겠습니다.</div>
+    <div class="tgme_widget_message_text">
+      <a href="http://newtoki1.org/">newtoki1.org</a>
+      구버전만 롤백 서버로 복구되었으며,
+      <a href="http://sbxh9.com/">sbxh9.com</a>
+      <a href="http://toki31.com/">toki31.com</a>
+      신버전 및 모든 서버 정상화까지 로그인은 제한되고 업로드가 중단됩니다.
+      <a href="https://telegra.ph/x">telegra.ph</a>
+    </div>
+    '''
+
+    def test_parse_should_extract_domains_and_maintenance(self):
+        from lib.official_feed import parse_feed
+
+        out = parse_feed(self.SAMPLE)
+        assert "sbxh9.com" in out["domains"] and "toki31.com" in out["domains"]
+        assert "newtoki1.org" in out["domains"]
+        assert not any("telegra.ph" in d for d in out["domains"])
+        assert out["maintenance"] is True
+        assert out["n_messages"] == 2
+
+    def test_parse_should_be_fail_open_when_unknown(self):
+        from lib.official_feed import parse_feed
+
+        out = parse_feed("<html>no messages</html>")
+        assert out["domains"] == []
+        assert out["maintenance"] is False
+
+    def test_merge_candidates_should_add_only_family_domains(self, tmp_path, monkeypatch):
+        import json
+
+        import lib.sources as sources
+
+        f = tmp_path / "sources.json"
+        f.write_text(
+            json.dumps(
+                {"toki31": {"domains": ["newtoki31.com"], "base_url": "https://newtoki31.com"}}
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sources, "_SOURCES_FILE", f)
+        from lib.official_feed import merge_candidates
+
+        added = merge_candidates(["sbxh9.com", "te.ml", "newtoki31.com"], "toki31")
+        assert added == 1
+        raw = json.loads(f.read_text(encoding="utf-8"))
+        assert "sbxh9.com" in raw["toki31"]["domains"]
+        assert raw["toki31"]["base_url"] == "https://newtoki31.com"
