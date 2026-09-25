@@ -1182,7 +1182,7 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     (loop는 소스별로 순회하므로 한 소스의 중단이 다른 소스를 막지 않음)
     """
     from lib.sources import get_traffic_limited
-    from lib.traffic_guard import reset_if_new_day, is_exceeded_calibrated, add_bytes, summary, summary_calibrated, quota_level
+    from lib.traffic_guard import reset_if_new_day, should_stop_daily, add_bytes, summary, summary_calibrated, quota_level
     from lib.toki31_playwright import get_traffic_total_bytes, get_collector_state
 
     # 트래픽 가드 적용 여부 — 특정 소스 필터 시 그 소스가 유료 프록시인지에 따라.
@@ -1192,12 +1192,14 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
     reset_if_new_day()
     # 한도 체크는 보정값 기준 (실제 과금 트래픽 근사)
     # 로깅은 원시값 + 보정값 둘 다 표시
-    if traffic_limited and is_exceeded_calibrated():
+    if traffic_limited and should_stop_daily():
         s_raw = summary()
         s_cal = summary_calibrated()
+        _ccap = s_cal.get('daily_chapter_cap') or 0
+        _why = "회차 캡" if (_ccap > 0 and s_cal.get('chapters_today', 0) >= _ccap) else "트래픽 한도"
         log.warning(
-            f"  ⏸ 일일 트래픽 한도 초과 (보정: {s_cal['used_mb']}MB/{s_cal['daily_limit_mb']}MB, "
-            f"원시: {s_raw['used_mb']}MB, 계수: {s_cal['calibration_factor']}x) "
+            f"  ⏸ 일일 {_why} 도달 (바이트 {s_cal['used_mb_guard']}MB/{s_cal['daily_limit_mb']}MB, "
+            f"회차 {s_cal.get('chapters_today')}/{_ccap}, 계수 {s_cal['calibration_factor']}x) "
             f"— 자정까지 {source_filter or '유료 소스'} 중단 (queue {len(_load_queue())}건 보존)"
         )
         return {"processed": 0, "errors": [], "remaining": len(_load_queue()), "traffic_exceeded": True}
@@ -1207,9 +1209,12 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
         if _qlevel in ("warn", "critical"):
             s_q = summary_calibrated()
             _msg = (
-                f"  {'🚨' if _qlevel == 'critical' else '⚠️'} 일일 트래픽 한도 근접({_qlevel}) "
-                f"({s_q.get('used_mb_guard')}MB/{s_q['daily_limit_mb']}MB, 계수 {s_q['calibration_factor']}x, "
-                f"예측 {s_q.get('forecast_mb')}MB, source={s_q.get('used_mb_guard_source')})"
+                f"  {'🚨' if _qlevel == 'critical' else '⚠️'} 일일 한도 근접({_qlevel}) "
+                f"({s_q.get('used_mb_guard')}MB/{s_q['daily_limit_mb']}MB, "
+                f"회차 {s_q.get('chapters_today')}/{s_q.get('daily_chapter_cap')}, "
+                f"계수 {s_q['calibration_factor']}x, "
+                f"예측 {s_q.get('forecast_mb')}MB/{s_q.get('forecast_chapters')}화, "
+                f"source={s_q.get('used_mb_guard_source')})"
             )
             (log.critical if _qlevel == "critical" else log.warning)(_msg)
 
@@ -1425,12 +1430,13 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
 
         # 일일 한도 도달 시 남은 회차는 다음 날 재개 (현재 회차는 위에서 처리/저장 완료)
         # 유료 프록시 소스에만 적용 (bookto31 등 무료 소스는 계속)
-        if traffic_limited and is_exceeded_calibrated():
-            s_raw = summary()
+        if traffic_limited and should_stop_daily():
             s_cal = summary_calibrated()
+            _ccap = s_cal.get('daily_chapter_cap') or 0
+            _why = "회차 캡" if (_ccap > 0 and s_cal.get('chapters_today', 0) >= _ccap) else "트래픽 한도"
             log.warning(
-                f"  ⏸ 일일 트래픽 한도 도달 (보정: {s_cal['used_mb']}MB/{s_cal['daily_limit_mb']}MB, "
-                f"원시: {s_raw['used_mb']}MB, 계수: {s_cal['calibration_factor']}x) "
+                f"  ⏸ 일일 {_why} 도달 (바이트 {s_cal['used_mb_guard']}MB/{s_cal['daily_limit_mb']}MB, "
+                f"회차 {s_cal.get('chapters_today')}/{_ccap}, 계수 {s_cal['calibration_factor']}x) "
                 f"— 남은 {len(queue) - i - 1}건은 자정 이후 재개"
             )
             break

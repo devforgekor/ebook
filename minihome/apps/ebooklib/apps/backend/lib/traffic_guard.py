@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/traffic_state.json')
 API_STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/dataimpulse_api_state.json')
 
-DEFAULT_DAILY_LIMIT_MB = 200
+DEFAULT_DAILY_LIMIT_MB = 400
+DEFAULT_DAILY_CHAPTER_CAP = 2000
 
 # 기본 보정 계수 (API 과금 / TG 로컬 측정)
 # [WHY] 2026-09-25 확정: 로컬 TG 과소 측정 → API/TG > 1 (실측 1.96, EWMA 1.8051).
@@ -73,6 +74,14 @@ def get_daily_limit_mb() -> int:
 
 def daily_limit_bytes() -> int:
     return get_daily_limit_mb() * 1024 * 1024
+
+
+def get_daily_chapter_cap() -> int:
+    """일일 회차 캡(유료 저장 회차) — env EBOOK_DAILY_CHAPTER_CAP (기본 2000)."""
+    try:
+        return int(os.getenv('EBOOK_DAILY_CHAPTER_CAP', str(DEFAULT_DAILY_CHAPTER_CAP)))
+    except (TypeError, ValueError):
+        return DEFAULT_DAILY_CHAPTER_CAP
 
 
 def _today() -> str:
@@ -160,6 +169,11 @@ def get_prev_day() -> Optional[dict]:
 
 def current_bytes() -> int:
     return int(load_state().get('bytes', 0))
+
+
+def chapters_today() -> int:
+    """오늘 누적된 유료 저장 회차 수."""
+    return int(load_state().get('chapters', 0))
 
 
 def add_bytes(n: int, chapter: bool = False) -> dict:
@@ -628,8 +642,18 @@ def forecast_used_mb(at: Optional[float] = None) -> Optional[float]:
     return used / (elapsed / 86400) / (1024 * 1024)
 
 
+def forecast_chapters(at: Optional[float] = None) -> Optional[int]:
+    """현재 속도로 하루를 채울 때의 예상 회차 수. 1h 미만 경과 시 None."""
+    dt = datetime.fromtimestamp(at) if at is not None else datetime.now()
+    midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = (dt - midnight).total_seconds()
+    if elapsed < FORECAST_MIN_ELAPSED_SEC:
+        return None
+    return int(chapters_today() / (elapsed / 86400))
+
+
 def quota_level() -> str:
-    """예산 단계 — 보수적 사용량과 예측의 최악값 기준 ok/warn(80%)/critical(95%)."""
+    """예산 단계 — 바이트·회차의 실제/예측 최악값 기준 ok/warn(80%)/critical(95%)."""
     used, _ = guard_used_bytes()
     limit = daily_limit_bytes()
     if limit <= 0:
@@ -638,6 +662,12 @@ def quota_level() -> str:
     forecast_mb = forecast_used_mb()
     if forecast_mb is not None:
         worst = max(worst, forecast_mb * 1024 * 1024 / limit)
+    chapter_cap = get_daily_chapter_cap()
+    if chapter_cap > 0:
+        worst = max(worst, chapters_today() / chapter_cap)
+        fc_chapters = forecast_chapters()
+        if fc_chapters is not None:
+            worst = max(worst, fc_chapters / chapter_cap)
     if worst >= QUOTA_HARD_PCT:
         return "critical"
     if worst >= QUOTA_WARN_PCT:
@@ -655,6 +685,17 @@ def is_exceeded_calibrated() -> bool:
     """일일 한도 초과 여부 — 보수적(API와 TG×보정 중 큰 값) 기준."""
     used, _ = guard_used_bytes()
     return used >= daily_limit_bytes()
+
+
+def is_chapter_exceeded() -> bool:
+    """일일 회차 캡 도달 여부(유료 저장 회차 기준)."""
+    cap = get_daily_chapter_cap()
+    return cap > 0 and chapters_today() >= cap
+
+
+def should_stop_daily() -> bool:
+    """일일 차단 — 바이트 한도(100%) 또는 회차 캡 중 먼저 닿는 쪽."""
+    return is_exceeded_calibrated() or is_chapter_exceeded()
 
 
 def summary_calibrated() -> dict:
@@ -676,6 +717,9 @@ def summary_calibrated() -> dict:
         "forecast_mb": (
             round(forecast_used_mb(), 2) if forecast_used_mb() is not None else None
         ),
+        "daily_chapter_cap": get_daily_chapter_cap(),
+        "chapters_today": chapters_today(),
+        "forecast_chapters": forecast_chapters(),
         "used_mb_api": round(api_mb, 2) if api_mb is not None else None,
         "used_mb_tg_calibrated": round(used_tg_cal / (1024 * 1024), 2),
         "used_mb_raw": round(used_raw / (1024 * 1024), 2),

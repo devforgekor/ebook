@@ -378,3 +378,50 @@ class TestSeed:
         r = tg.update_bucket_anomaly(225.4)  # +20.1%
         assert r["dev_pct"] is not None
         assert r["streak"] == 1
+
+
+class TestChapterCap:
+    def test_should_use_env_chapter_cap(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_CHAPTER_CAP", "50")
+        assert tg.get_daily_chapter_cap() == 50
+
+    def test_should_fallback_to_default_chapter_cap(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_CHAPTER_CAP", "not-a-number")
+        assert tg.get_daily_chapter_cap() == tg.DEFAULT_DAILY_CHAPTER_CAP
+
+    def test_should_block_on_chapter_cap(self, state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_CHAPTER_CAP", "2")
+        tg.add_bytes(1, chapter=True)
+        tg.add_bytes(1, chapter=True)
+        assert tg.chapters_today() == 2
+        assert tg.is_chapter_exceeded() is True
+        assert tg.should_stop_daily() is True
+
+    def test_should_not_block_below_chapter_cap(self, state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_CHAPTER_CAP", "5")
+        tg.add_bytes(1, chapter=True)
+        assert tg.is_chapter_exceeded() is False
+
+    def test_forecast_chapters_should_extrapolate(self, state, monkeypatch):
+        from datetime import datetime, timezone
+
+        tg.save_state(
+            {"date": tg._today(), "bytes": 0, "chapters": 100, "calibration_factor_ewma": 1.0}
+        )
+        noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        assert tg.forecast_chapters(at=noon.timestamp()) == 200
+
+    def test_quota_level_should_consider_chapters(self, state, monkeypatch):
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "100")
+        monkeypatch.setenv("EBOOK_DAILY_CHAPTER_CAP", "100")
+        monkeypatch.setattr(tg, "API_STATE_FILE", state.parent / "none.json")
+        monkeypatch.setattr(tg, "forecast_used_mb", lambda at=None: None)
+        monkeypatch.setattr(tg, "forecast_chapters", lambda at=None: None)
+        tg.save_state(
+            {"date": tg._today(), "bytes": 0, "chapters": 85, "calibration_factor_ewma": 1.0}
+        )
+        assert tg.quota_level() == "warn"
+        tg.save_state(
+            {"date": tg._today(), "bytes": 0, "chapters": 96, "calibration_factor_ewma": 1.0}
+        )
+        assert tg.quota_level() == "critical"
