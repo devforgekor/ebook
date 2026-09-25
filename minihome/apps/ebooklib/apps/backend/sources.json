@@ -13,7 +13,9 @@
   },
   "toki31": {
     "domains": [
-      "newtoki31.com"
+      "newtoki31.com",
+      "toki31.com",
+      "sbxh9.com"
     ],
     "base_url": "https://newtoki31.com",
     "collector": "toki31",
