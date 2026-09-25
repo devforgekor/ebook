@@ -714,15 +714,17 @@ class Toki31Collector:
         )
 
     def _proxy_url(self) -> Optional[str]:
-        """Playwright 프록시 dict → requests용 URL(user:pass@host:port)."""
-        proxy = self._proxy or {}
-        server = proxy.get("server")
-        if not server:
-            return None
-        user, password = proxy.get("username"), proxy.get("password")
-        if user and password:
-            return server.replace("://", f"://{user}:{password}@", 1)
-        return server
+        """requests용 프록시 URL — DataImpulse는 **로컬 inject 프록시**를 쓴다.
+
+        [WORKAROUND] Chromium은 407 없이는 자격증명을 보내지 않아 KR 타깃팅이 빠진다.
+        DataImpulse도 407을 주지 않으므로, 생 자격증명 대신 inject 프록시(127.0.0.1)를
+        사용해야 한다(실측: 생 자격증명 직접 사용 시 SSLError).
+        """
+        try:
+            config = playwright_proxy_config()
+        except Exception:  # noqa: BLE001
+            config = None
+        return config.get("server") if config else None
 
     async def _fetch_content_api_http(self, timeout_ms: int) -> Optional[dict]:
         """HTTP 우선 시도(기본 OFF) — 스펙/쿠키 없거나 실패면 None(브라우저 폴백)."""

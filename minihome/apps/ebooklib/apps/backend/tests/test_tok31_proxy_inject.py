@@ -236,3 +236,21 @@ class TestHttpFirst:
         spec = {"url": "https://x/api/novel-content", "method": "GET"}
         assert asyncio.run(fetch_content_api_http(spec, "sid=abc", caller=boom)) is None
         assert asyncio.run(fetch_content_api_http(spec, "sid=abc", caller=not_ok)) is None
+
+
+class TestInjectProxyUrl:
+    def test_should_use_inject_proxy_server(self, monkeypatch):
+        import lib.toki31_playwright as tp
+
+        monkeypatch.setattr(
+            tp, "playwright_proxy_config", lambda env=None: {"server": "http://127.0.0.1:1234"}
+        )
+        collector = tp.Toki31Collector.__new__(tp.Toki31Collector)
+        assert collector._proxy_url() == "http://127.0.0.1:1234"
+
+    def test_should_return_none_without_proxy(self, monkeypatch):
+        import lib.toki31_playwright as tp
+
+        monkeypatch.setattr(tp, "playwright_proxy_config", lambda env=None: None)
+        collector = tp.Toki31Collector.__new__(tp.Toki31Collector)
+        assert collector._proxy_url() is None
