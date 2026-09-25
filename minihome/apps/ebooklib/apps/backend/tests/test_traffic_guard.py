@@ -425,3 +425,24 @@ class TestChapterCap:
             {"date": tg._today(), "bytes": 0, "chapters": 96, "calibration_factor_ewma": 1.0}
         )
         assert tg.quota_level() == "critical"
+
+
+class TestUsageHeaders:
+    def test_should_extract_only_usage_related_headers(self):
+        from lib.dataimpulse_monitor import _extract_usage_headers
+
+        headers = {
+            "X-Proxy-Usage": "12MB",
+            "X-Usage-Limit": "500",
+            "Authorization": "Basic c2VjcmV0",
+            "Set-Cookie": "sid=1",
+            "Content-Type": "application/json",
+        }
+        out = _extract_usage_headers(headers)
+        assert out == {"X-Proxy-Usage": "12MB", "X-Usage-Limit": "500"}
+
+    def test_should_return_empty_when_no_usage_headers(self):
+        from lib.dataimpulse_monitor import _extract_usage_headers
+
+        assert _extract_usage_headers({"Content-Type": "application/json"}) == {}
+        assert _extract_usage_headers(None) == {}

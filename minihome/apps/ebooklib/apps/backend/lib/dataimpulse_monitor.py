@@ -146,6 +146,28 @@ def _today_str() -> str:
     return datetime.utcnow().strftime('%Y-%m-%d')
 
 
+_USAGE_HEADER_HINTS = ("usage", "proxy", "quota", "rate", "traffic", "requests")
+
+
+def _extract_usage_headers(headers) -> dict:
+    """DataImpulse 게이트웨이 응답에서 사용량/프록시 관련 헤더만 추출.
+
+    [WHY] §10-3 분석: X-Proxy-Usage 등 게이트웨이 헤더로 과금 힌트를 얻는다.
+    인증/쿠키 등 민감 헤더는 힌트 불일치로 자연 제외된다.
+    """
+    out: dict = {}
+    for key, value in (headers or {}).items():
+        low = str(key).lower()
+        if any(hint in low for hint in _USAGE_HEADER_HINTS):
+            out[str(key)] = str(value)[:200]
+    return out
+
+
+def _log_usage_headers(headers: dict) -> None:
+    if headers:
+        logger.info(f"DataImpulse 사용량 헤더: {headers}")
+
+
 def fetch_stats() -> Optional[dict]:
     """기본 통계 조회 (/api/stats)."""
     user, passwd = _load_proxy_credentials()
@@ -157,6 +179,7 @@ def fetch_stats() -> Optional[dict]:
     try:
         resp = requests.get(url, auth=(user, passwd), timeout=10, verify=False)
         if resp.status_code == 200:
+            _log_usage_headers(_extract_usage_headers(resp.headers))
             return resp.json()
         else:
             logger.warning(f"DataImpulse API 오류: {resp.status_code} - {resp.text}")
@@ -176,6 +199,7 @@ def fetch_stats_with_history() -> Optional[dict]:
     try:
         resp = requests.get(url, auth=(user, passwd), timeout=10, verify=False)
         if resp.status_code == 200:
+            _log_usage_headers(_extract_usage_headers(resp.headers))
             return resp.json()
         else:
             logger.warning(f"DataImpulse API 오류: {resp.status_code} - {resp.text}")
