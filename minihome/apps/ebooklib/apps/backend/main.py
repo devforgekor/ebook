@@ -27,8 +27,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# CORS 설정
-cors_origins_str = os.getenv("CORS_ORIGINS", '["http://localhost:3000"]')
+# CORS 설정 (KV EBOOK-CORS-ORIGINS 우선, 로컬 개발은 .env/CORS_ORIGINS)
+cors_origins_str = os.getenv("EBOOK_CORS_ORIGINS") or os.getenv("CORS_ORIGINS", '["http://localhost:3000"]')
 import json
 
 cors_origins = json.loads(cors_origins_str)
