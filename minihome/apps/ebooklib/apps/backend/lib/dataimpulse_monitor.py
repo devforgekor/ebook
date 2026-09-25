@@ -1,286 +1,376 @@
 #!/usr/bin/env python3
-"""DataImpulse 대시보드 모니터 - 프록시 기반 (Playwright)
+# Status: production
+# Path: ebooklib/apps/backend/lib/dataimpulse_monitor.py
+"""DataImpulse 공식 API 클라이언트 — 트래픽 실측 비교.
 
-10화마다 호출하여 DataImpulse 대시보드 사용량과 추적 데이터를 비교합니다.
-두 가지 인증 모드 지원:
-  1. 프록시 인증 (user:pass@gw.dataimpulse.com:823) — 현재 사용 중
-  2. IP 화이트리스트 — 서버 IP를 DataImpulse 대시보드에 등록하면 인증 불요청
+DataImpulse Gateway API (https://gw.dataimpulse.com:777) 사용:
+- GET /api/stats: 기본 통계 (total_traffic, traffic_used, traffic_left, used_threads)
+- GET /api/stats_with_history: 일별 히스토리 포함
 
-데이터 흐름:
-  프록시(인증 또는 화이트리스트) → DataImpulse 대시보드 → 사용량 파싱 → 비교 로깅
+Playwright 스크래핑 완전 대체: 60초 → <1초, 10화 제한 → 매 화 호출 가능.
+
+인증: DataImpulse Gateway API는 Basic Auth(user/pass)를 사용한다.
+시크릿은 Azure Key Vault에 저장하고 `kv-fetch-env.py`가 환경변수로 주입한다
+(SSOT: /opt/projects/server/docs/handover-secrets-kv.md §12/§13).
+
+Key Vault 시크릿 → 환경변수 매핑 (하이픈→밑줄):
+    DATAIMPULSE-API-KEY   → DATAIMPULSE_API_KEY   (API/프록시 login)
+    DATAIMPULSE-LOGIN     → DATAIMPULSE_LOGIN
+    DATAIMPULSE-PASS      → DATAIMPULSE_PASS
+    DATAIMPULSE-PROXY-KEY → DATAIMPULSE_PROXY_KEY (user:pass@host:port 결합형)
+    DATAIMPULSE-HOST/PORT → DATAIMPULSE_HOST/PORT
+
+자격증명 우선순위:
+1. DATAIMPULSE_PROXY_KEY (결합형, KV)
+2. DATAIMPULSE_API_KEY / DATAIMPULSE_LOGIN / DATAIMPULSE_USER (개별 env, KV)
+3. .env.local (로컬 개발용 템플릿, git 미포함)
+
+서버 하드코딩 금지 — 시크릿 값은 코드에 두지 않는다.
 """
 
-import asyncio
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import async_playwright
+import requests
+import urllib3
 
+from lib.bucket_meter import (
+    DEFAULT_API_POINTS_PATH,
+    ApiPoint,
+    append_api_snapshots,
+    prune_api_snapshots,
+)
 from lib.traffic_guard import summary as get_traffic_summary
+
+# SSL 검증 비활성화 (자체 서명 인증서 대응)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
-DASHBOARD_URL = "https://app.dataimpulse.com/dashboard"
-SIGNIN_URL = "https://app.dataimpulse.com/sign-in"
+API_BASE = "https://gw.dataimpulse.com:777"
+STATS_ENDPOINT = "/api/stats"
+STATS_HISTORY_ENDPOINT = "/api/stats_with_history"
 
-_env_path = Path(__file__).parent.parent / ".env.local"
+# 상태 파일: API 응답 캐시 및 비교 이력
+STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/dataimpulse_api_state.json')
 
 
-def _parse_proxy_key(value: str):
-    """KV 결합 프록시 키 'user:pass@host:port' → (user, pass, host, port)."""
-    user = pw = host = port = ""
+def _parse_proxy_key(value: str) -> tuple[str, str]:
+    """결합형 프록시 키 'user:pass@host:port' → (user, pass)."""
     if "@" in value:
-        cred, hostport = value.rsplit("@", 1)
+        cred = value.rsplit("@", 1)[0]
         if ":" in cred:
             user, pw = cred.split(":", 1)
-        if ":" in hostport:
-            host, port = hostport.split(":", 1)
-    return user, pw, host, port
+            return user, pw
+    return "", ""
 
 
-def _load_proxy_credentials() -> tuple[str, str, str, int]:
-    """DataImpulse 프록시 인증 정보 로드. 우선순위: 개별 env > KV 결합키 > .env.local."""
-    # 1. .env.local에서 기본값 로드
-    file_user = ""
-    file_pass = ""
-    file_host = ""
-    file_port = 823
-    if _env_path.exists():
-        for line in _env_path.read_text().splitlines():
+def _load_env_local() -> dict:
+    """로컬 개발용 .env.local 파싱 (템플릿; 실제 값은 KV 주입)."""
+    env: dict = {}
+    env_path = Path(__file__).parent.parent / ".env.local"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
             line = line.strip()
-            if line.startswith("DATAIMPULSE_USER="):
-                file_user = line.split("=", 1)[1].strip()
-            elif line.startswith("DATAIMPULSE_PASS="):
-                file_pass = line.split("=", 1)[1].strip()
-            elif line.startswith("DATAIMPULSE_HOST="):
-                file_host = line.split("=", 1)[1].strip()
-            elif line.startswith("DATAIMPULSE_PORT="):
-                try:
-                    file_port = int(line.split("=", 1)[1].strip())
-                except ValueError:
-                    pass
-
-    # 2. env vars가 .env.local보다 우선 (override)
-    user = os.getenv("DATAIMPULSE_USER", file_user)
-    passwd = os.getenv("DATAIMPULSE_PASS", file_pass)
-    host = os.getenv("DATAIMPULSE_HOST", file_host or "gw.dataimpulse.com")
-    port = int(os.getenv("DATAIMPULSE_PORT", str(file_port)))
-
-    # 3. KV 결합 키(DATAIMPULSE_PROXY_KEY) 파싱 — 개별 키 미설정 시 보충
-    combined = os.getenv("DATAIMPULSE_PROXY_KEY", "")
-    if combined:
-        cu, cp, ch, cpt = _parse_proxy_key(combined)
-        user = user or cu
-        passwd = passwd or cp
-        host = host or ch
-        try:
-            port = port or int(cpt)
-        except ValueError:
-            pass
-
-    return user, passwd, host, port
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                env[k.strip()] = v.strip()
+    return env
 
 
-def _proxy_url() -> str:
-    """프록시 URL 구성 (credentials 있음/없음 둘 다 지원)."""
-    user, passwd, host, port = _load_proxy_credentials()
-    if user and passwd:
-        return f"http://{user}:{passwd}@{host}:{port}"
-    return f"http://{host}:{port}"
+def _load_proxy_credentials() -> tuple[str, str]:
+    """DataImpulse API/프록시 자격증명 로드 (Basic Auth user, pass).
 
-
-def _is_ip_whitelist_mode() -> bool:
-    """IP 화이트리스트 모드 활성화 여부 확인."""
-    return os.getenv("DATAIMPULSE_IP_WHITELIST", "").lower() in ("1", "true", "yes")
-
-
-def _build_proxy_config() -> tuple[Optional[dict], str]:
-    """프록시 설정과 모드 설명을 반환."""
-    user, passwd, host, port = _load_proxy_credentials()
-    whitelist_mode = _is_ip_whitelist_mode()
-
-    if whitelist_mode:
-        proxy_config = {"server": f"http://{host}:{port}"}
-        mode_desc = f"IP Whitelist 모드 (프록시: {host}:{port})"
-    else:
-        proxy_config = {
-            "server": _proxy_url(),
-            "username": user,
-            "password": passwd,
-        }
-        mode_desc = f"프록시 인증 모드 (프록시: {host}:{port})"
-
-    return proxy_config, mode_desc
-
-
-async def _access_dashboard(page, proxy_config: Optional[dict]):
-    """프록시를 통해 대시보드에 접속하고 페이지 정보를 반환."""
-    try:
-        await page.goto(DASHBOARD_URL, wait_until="networkidle", timeout=30000)
-    except Exception:
-        await page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
-
-    await page.wait_for_timeout(5000)
-    page_text = await page.content()
-    current_url = page.url
-    return page_text, current_url
-
-
-def _parse_usage(page_text: str) -> tuple[Optional[float], Optional[float]]:
-    """페이지 텍스트에서 사용량(GB)과 잔여량(GB)을 파싱."""
-    used_gb = None
-    remaining_gb = None
-
-    match = re.search(r'\(?\s*([0-9.]+)\s*GB\s*\)?\s*(?:left|used)', page_text, re.IGNORECASE)
-    if match:
-        idx = match.start()
-        if 'left' in page_text.lower()[idx:]:
-            remaining_gb = float(match.group(1))
-        else:
-            used_gb = float(match.group(1))
-
-    # GB 숫자만 있는 경우 (left/used 단어 없음) → used_gb로 기본 설정
-    if used_gb is None and remaining_gb is None:
-        matches = re.findall(r'([0-9.]+)\s*GB', page_text, re.IGNORECASE)
-        if matches:
-            used_gb = float(matches[-1])
-
-    return used_gb, remaining_gb
-
-
-async def check_dataimpulse_usage(cdp_url: str = "http://127.0.0.1:9222") -> dict:
-    """DataImpulse 대시보드에서 사용량을 확인합니다 (프록시 기반).
-
-    모드:
-      1. IP 화이트리스트 모드 (DATAIMPULSE_IP_WHITELIST=1):
-         프록시 인증 없이 서버 IP로 접근 (DataImpulse 대시보드에서 IP 등록 필요)
-      2. 프록시 인증 모드 (기본):
-         프록시 URL에 user:pass 포함하여 접근
-
-    Returns:
-        dict: success, used_gb, remaining_gb, tracked_used_mb, tracked_chapters, message
+    우선순위:
+    1. 환경변수 — kv-fetch-env.py가 Key Vault에서 주입 (운영/컨테이너)
+    2. .env.local — 로컬 개발 템플릿 (git 미포함)
     """
-    user, passwd, host, port = _load_proxy_credentials()
-    whitelist_mode = _is_ip_whitelist_mode()
+    local = _load_env_local()
 
-    if not whitelist_mode and (not user or not passwd):
-        msg = "DataImpulse 크레덴셜 없음 — 대시보드 확인 스킵"
-        logger.warning(msg)
-        return {"success": False, "used_gb": None, "remaining_gb": None, "message": msg}
+    def _env(name: str) -> str:
+        return os.getenv(name, "") or local.get(name, "")
 
-    result = {
-        "success": False,
-        "used_gb": None,
-        "remaining_gb": None,
-        "tracked_used_mb": 0,
-        "tracked_chapters": 0,
-        "message": "",
+    # 1. 결합형 키 (user:pass@host:port)
+    combined = _env("DATAIMPULSE_PROXY_KEY")
+    if combined and "@" in combined:
+        user, passwd = _parse_proxy_key(combined)
+        if user and passwd:
+            return user, passwd
+
+    # 2. 개별 키 — API-KEY(login) > LOGIN > USER
+    user = _env("DATAIMPULSE_API_KEY") or _env("DATAIMPULSE_LOGIN") or _env("DATAIMPULSE_USER")
+    passwd = _env("DATAIMPULSE_PASS")
+
+    if not user or not passwd:
+        logger.warning(
+            "DataImpulse 자격증명 없음 — 환경변수(DATAIMPULSE_API_KEY/DATAIMPULSE_PASS) "
+            "또는 .env.local 확인"
+        )
+
+    return user, passwd
+
+
+def _load_api_state() -> dict:
+    """API 상태 파일 로드."""
+    if STATE_FILE.exists():
+        try:
+            import json
+            return json.loads(STATE_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+    return {
+        "last_check": 0,
+        "last_api_data": None,
+        "comparisons": []
     }
 
+
+def _save_api_state(state: dict) -> None:
+    """API 상태 파일 저장."""
     try:
-        async with async_playwright() as p:
-            proxy_config, mode_desc = _build_proxy_config()
-            logger.info("DataImpulse 대시보드 접속 중 — %s...", mode_desc)
-
-            browser = await p.chromium.launch(headless=True, proxy=proxy_config)
-            context = await browser.new_context(user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ))
-            page = await context.new_page()
-
-            try:
-                page_text, current_url = await _access_dashboard(page, proxy_config)
-
-                if "sign-in" in current_url or "login" in current_url.lower():
-                    result["message"] = (
-                        "로그인 필요 — "
-                        + ("IP 화이트리스트를 확인하세요" if whitelist_mode else "프록시 인증 확인 필요")
-                    )
-                    logger.warning("DataImpulse 대시보드: 로그인 페이지로 리다이렉트됨 (%s)", mode_desc)
-                    _log_fallback_status(result)
-                    return result
-
-                used_gb, remaining_gb = _parse_usage(page_text)
-
-                if used_gb is not None or remaining_gb is not None:
-                    result["success"] = True
-                    result["used_gb"] = used_gb
-                    result["remaining_gb"] = remaining_gb
-                    result["message"] = f"대시보드 확인 완료 ({mode_desc})"
-                    _log_comparison(result)
-                else:
-                    result["message"] = "사용량 데이터 파싱 실패"
-                    _log_fallback_status(result)
-
-            finally:
-                await browser.close()
-
-            return result
-
+        import json
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(f'.tmp.{os.getpid()}')
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
-        result["message"] = f"대시보드 확인 실패: {e}"
-        logger.warning(f"DataImpulse 대시보드 확인 실패: {e}")
-        _log_fallback_status(result)
-        return result
+        logger.warning(f"DataImpulse API 상태 저장 실패: {e}")
 
 
-def _log_fallback_status(result: dict):
-    """접근 실패 시 fallback 상태 로깅."""
-    tracked = get_traffic_summary()
+def _today_str() -> str:
+    """오늘 날짜 문자열 (UTC)."""
+    from datetime import datetime
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def fetch_stats() -> Optional[dict]:
+    """기본 통계 조회 (/api/stats)."""
+    user, passwd = _load_proxy_credentials()
+    if not user or not passwd:
+        logger.warning("DataImpulse 크레덴셜 없음")
+        return None
+    
+    url = f"{API_BASE}{STATS_ENDPOINT}"
+    try:
+        resp = requests.get(url, auth=(user, passwd), timeout=10, verify=False)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            logger.warning(f"DataImpulse API 오류: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        logger.warning(f"DataImpulse API 호출 실패: {e}")
+    return None
+
+
+def fetch_stats_with_history() -> Optional[dict]:
+    """히스토리 포함 통계 조회 (/api/stats_with_history)."""
+    user, passwd = _load_proxy_credentials()
+    if not user or not passwd:
+        logger.warning("DataImpulse 크레덴셜 없음")
+        return None
+    
+    url = f"{API_BASE}{STATS_HISTORY_ENDPOINT}"
+    try:
+        resp = requests.get(url, auth=(user, passwd), timeout=10, verify=False)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            logger.warning(f"DataImpulse API 오류: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        logger.warning(f"DataImpulse API 호출 실패: {e}")
+    return None
+
+
+def get_today_usage(api_data: dict) -> Optional[dict]:
+    """API 응답에서 오늘 데이터 추출."""
+    if not api_data or 'traffic_history' not in api_data:
+        return None
+    
+    today = _today_str()
+    for entry in api_data['traffic_history']:
+        if entry.get('group_date', '').startswith(today):
+            return {
+                'date': today,
+                'inbound_mb': round(entry.get('inbound_traffic', 0) / 1024 / 1024, 2),
+                'outgoing_mb': round(entry.get('outgoing_traffic', 0) / 1024 / 1024, 2),
+                'total_mb': round(entry.get('total_traffic', 0) / 1024 / 1024, 2),
+                'requests': entry.get('requests_count', 0),
+                'errors': entry.get('errors', 0),
+                'raw': entry
+            }
+    return None
+
+
+def compare_with_traffic_guard(api_today: dict) -> dict:
+    """traffic_guard 실측과 API 실측 비교."""
+    tg = get_traffic_summary()
+    
+    api_mb = api_today['total_mb']
+    tg_mb = tg['used_mb']
+    diff_mb = api_mb - tg_mb
+    diff_pct = (diff_mb / api_mb * 100) if api_mb > 0 else 0
+    
+    result = {
+        "timestamp": time.time(),
+        "date": api_today['date'],
+        "api_mb": api_mb,
+        "tg_mb": tg_mb,
+        "diff_mb": round(diff_mb, 2),
+        "diff_pct": round(diff_pct, 1),
+        "tg_chapters": tg['chapters'],
+        "api_requests": api_today['requests'],
+        "api_inbound_mb": api_today['inbound_mb'],
+        "api_outgoing_mb": api_today['outgoing_mb'],
+    }
+    
+    # 로깅
     logger.info(
-        f"📊 DataImpulse fallback: {result.get('message', '알 수 없음')} | "
-        f"추적 데이터: {tracked['used_mb']:.1f}MB / {tracked['chapters']}화"
+        f"📊 DataImpulse API 비교: "
+        f"API={api_mb:.2f}MB (in:{api_today['inbound_mb']:.2f} out:{api_today['outgoing_mb']:.2f}) | "
+        f"TG={tg_mb:.2f}MB | "
+        f"차이={diff_mb:+.2f}MB ({diff_pct:+.1f}%) | "
+        f"TG챕터={tg['chapters']} API요청={api_today['requests']}"
     )
+    
+    if abs(diff_pct) > 20:
+        logger.warning(
+            f"⚠️ TG-API 격차 큼 ({diff_pct:+.1f}%) — "
+            f"TG가 API 대비 {'과소' if diff_mb > 0 else '과대'} 측정 중"
+        )
+    
+    return result
+
+
+def _maybe_calibrate_daily(api_data: dict) -> None:
+    """보정계수를 '가장 최근 완료된 수집일' 총량 기준으로 1일 1회 갱신.
+
+    [WHY] DataImpulse API 카운터는 단구간(수십 화)에서 비단조·청크 갱신이라
+    per-chapter/per-window 비율이 0.55~0.75로 흔들린다. 또한 수집은 매일 하지
+    않으므로 '어제' 고정이 아니라, 마지막으로 수집이 있었던 날(prev_day)의
+    총량을 기준으로 삼는다. 같은 날짜에 대해 중복 갱신하지 않는다.
+    """
+    from lib.traffic_guard import _update_calibration_factor_ewma, get_prev_day
+
+    prev = get_prev_day() or {}
+    day = prev.get('date')
+    if not day:
+        logger.info("보정계수 갱신 대기: 완료된 수집일(prev_day) 없음")
+        return
+
+    state = _load_api_state()
+    if state.get('calibration_last_day') == day:
+        return  # 이 수집일은 이미 보정함
+
+    # 해당 수집일의 API 총량 (히스토리에서 조회)
+    api_day_mb = None
+    for entry in (api_data.get('traffic_history') or []):
+        if entry.get('group_date', '').startswith(day):
+            api_day_mb = entry.get('total_traffic', 0) / 1024 / 1024
+            break
+    tg_day_mb = prev.get('bytes', 0) / 1024 / 1024
+
+    if api_day_mb and tg_day_mb > 0:
+        ratio = api_day_mb / tg_day_mb
+        _update_calibration_factor_ewma(ratio)
+        state['calibration_last_day'] = day
+        _save_api_state(state)
+        logger.info(
+            f"보정계수 갱신(수집일 {day}): API={api_day_mb:.1f}MB / TG={tg_day_mb:.1f}MB = {ratio:.3f}"
+        )
+    else:
+        logger.info(
+            f"보정계수 갱신 대기: 수집일 {day} 데이터 불충분 "
+            f"(api={api_day_mb}, tg_bytes={prev.get('bytes')})"
+        )
+
+
+def check_dataimpulse_sync() -> dict:
+    """동기 버전 — 파이프라인에서 직접 호출.
+    
+    Returns:
+        dict: success, api_data, comparison, message
+    """
+    # 히스토리 포함 조회 (오늘 데이터 필터링용)
+    api_data = fetch_stats_with_history()
+    
+    if not api_data:
+        return {"success": False, "message": "API 조회 실패"}
+    
+    api_today = get_today_usage(api_data)
+    if not api_today:
+        return {"success": False, "message": "오늘 데이터 없음"}
+    
+    comparison = compare_with_traffic_guard(api_today)
+
+    # [WHY] 원시 스냅샷 보존(plan §14.2): 수집 시간대 버킷 r 역산을 위해 append-only 보관.
+    #       comparisons(-100 롤링)는 파생이라 원시가 아니므로 별도 파일에 남긴다. fail-open.
+    try:
+        append_api_snapshots(
+            DEFAULT_API_POINTS_PATH,
+            [
+                ApiPoint(
+                    ts=time.time(),
+                    date=str(api_today["date"]),
+                    mb=float(api_today["total_mb"]),
+                )
+            ],
+        )
+        prune_api_snapshots(DEFAULT_API_POINTS_PATH)
+    except Exception as e:
+        logger.debug(f"원시 스냅샷 기록 실패(무시): {e}")
+
+    # 보정계수: 전일 총량 기준 1일 1회 갱신 (단구간 노이즈 차단)
+    try:
+        _maybe_calibrate_daily(api_data)
+    except Exception as e:
+        logger.debug(f"일일 보정계수 갱신 실패: {e}")
+
+    # 상태 저장
+    state = _load_api_state()
+    state["last_check"] = time.time()
+    state["last_api_data"] = api_today
+    state.setdefault("comparisons", []).append(comparison)
+    # 최근 100개만 유지
+    state["comparisons"] = state["comparisons"][-100:]
+    _save_api_state(state)
+    
+    return {
+        "success": True,
+        "api_data": api_today,
+        "comparison": comparison,
+        "message": f"API={api_today['total_mb']:.2f}MB TG={comparison['tg_mb']:.2f}MB diff={comparison['diff_pct']:+.1f}%"
+    }
+
+
+# 하위 호환: 기존 함수명 유지
+def check_dataimpulse_usage(cdp_url: str = "http://127.0.0.1:9222") -> dict:
+    """기존 인터페이스 호환 — Playwright 제거, API로 대체."""
+    return check_dataimpulse_sync()
 
 
 def _log_comparison(result: dict):
-    """추적 데이터와 대시보드 데이터 비교 로깅."""
-    tracked = get_traffic_summary()
-    used_gb = result.get("used_gb")
-    remaining_gb = result.get("remaining_gb")
-
-    if used_gb is not None:
-        dashboard_mb = used_gb * 1024
-        diff_mb = dashboard_mb - tracked["used_mb"]
-        diff_pct = (diff_mb / dashboard_mb * 100) if dashboard_mb > 0 else 0
-
-        logger.info(
-            f"📊 DataImpulse 비교: "
-            f"추적={tracked['used_mb']:.1f}MB | "
-            f"대시보드={used_gb:.2f}GB ({dashboard_mb:.1f}MB) | "
-            f"차이={diff_mb:+.1f}MB ({diff_pct:+.1f}%)"
-        )
-
-        if abs(diff_pct) > 50:
-            logger.warning(
-                f"⚠️ 추적과 대시보드 차이가 큼 ({diff_pct:+.1f}%) — "
-                f"불필요한 트래픽이 있을 수 있음"
-            )
-    elif remaining_gb is not None:
-        logger.info(
-            f"📊 DataImpulse 잔여: {remaining_gb:.2f}GB | "
-            f"추적: {tracked['used_mb']:.1f}MB"
-        )
-    else:
-        logger.info(f"📊 DataImpulse: {result.get('message', '알 수 없음')}")
+    """기존 호환 — 비교 로깅은 compare_with_traffic_guard에서 수행."""
+    pass
 
 
-def check_dataimpulse_sync(cdp_url: str = "http://127.0.0.1:9222") -> dict:
-    """동기 버전 — 파이프라인에서 직접 호출."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, check_dataimpulse_usage(cdp_url))
-                return future.result(timeout=60)
-        else:
-            return loop.run_until_complete(check_dataimpulse_usage(cdp_url))
-    except Exception as e:
-        logger.warning(f"DataImpulse 확인 실패: {e}")
-        return {"success": False, "message": str(e)}
+def _log_fallback_status(result: dict):
+    """기존 호환 — fallback 로깅."""
+    pass
+
+
+if __name__ == "__main__":
+    # 직접 실행 테스트
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    
+    print("=== DataImpulse API 테스트 ===")
+    result = check_dataimpulse_sync()
+    print(f"Success: {result['success']}")
+    print(f"Message: {result['message']}")
+    if result.get('api_data'):
+        print(f"API Today: {result['api_data']}")
+    if result.get('comparison'):
+        print(f"Comparison: {result['comparison']}")

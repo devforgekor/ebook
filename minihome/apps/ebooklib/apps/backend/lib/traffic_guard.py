@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Status: new
+# Status: experimental
 # Path: ebooklib/apps/backend/lib/traffic_guard.py
 """일일 트래픽 한도 가드 — 프록시 사용량 실측 누적 + 일일 한도 제어.
 
-DataImpulse/MaskProxy는 GB당 과금. 과소진 방지를 위해 실제 다운로드 바이트를
+DataImpulse는 GB당 과금. 과소진 방지를 위해 실제 다운로드 바이트를
 누적하고 일일 한도 초과 시 수집을 일시정지한다. (다음 날 자동 리셋)
 
 - 일일 한도: 환경변수 EBOOK_DAILY_TRAFFIC_LIMIT_MB (기본 200MB/일)
@@ -15,14 +15,38 @@ DataImpulse/MaskProxy는 GB당 과금. 과소진 방지를 위해 실제 다운�
 import json
 import logging
 import os
+import time
+from typing import Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/traffic_state.json')
+API_STATE_FILE = Path('/opt/ai_data/flaresolverr/ebook_watcher/dataimpulse_api_state.json')
 
 DEFAULT_DAILY_LIMIT_MB = 200
+
+# 기본 보정 계수 (API 측정 / TG 측정)
+# [WHY] 2026-09-23 실측: 구 monitor가 프록시로 대시보드를 로드해 자체 트래픽을
+# 만들어 1.59로 부풀려졌다. monitor를 공식 API로 교체한 뒤 측정한 실제 비율은
+# API/TG ≈ 0.75~0.86 (API < TG). TG가 압축 해제 본문까지 계상해 과다측정하기 때문.
+DEFAULT_CALIBRATION_FACTOR = 0.85
+MIN_CALIBRATION_FACTOR = 0.5
+MAX_CALIBRATION_FACTOR = 3.0
+
+# EWMA 보정 계수 설정
+CALIBRATION_ALPHA = 0.3           # EWMA 가중치 (0.2~0.4, 최근 3~4샘플 반영)
+CALIBRATION_MIN = 0.5             # 최소 계수 (API < TG 관측 허용)
+CALIBRATION_MAX = 3.0             # 최대 계수 (비정상 차단)
+CALIBRATION_CHANGE_WARN_PCT = 20  # 급변 경고 임계치 (%)
+
+# SPC (Statistical Process Control) 설정
+SPC_UCL_MULTIPLIER = 1.20         # UCL = Ref × 1.20 (+20%)
+SPC_LCL_MULTIPLIER = 0.80         # LCL = Ref × 0.80 (-20%)
+SPC_RULE2_CONSECUTIVE = 5         # Rule 2: Ref 한쪽에 N연속 (편향 감지)
+SPC_RULE2_DEADBAND_PCT = 5.0      # Rule 2 데드밴드: ±5% 이내면 무시 (정상 변동)
+SPC_RULE3_WARNING_THRESHOLD = 4   # Rule 3: 경고 누적 임계치 (비상중지)
 
 
 def get_daily_limit_mb() -> int:
@@ -40,6 +64,24 @@ def _today() -> str:
     return datetime.now().strftime('%Y-%m-%d')
 
 
+def _state_lock():
+    """traffic_state.json 배타 락 — 동시 collect 프로세스의 read-modify-write 경합 방지."""
+    import fcntl
+    lock_path = STATE_FILE.with_suffix('.lock')
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(lock_path, 'w')
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _state_unlock(fd) -> None:
+    import fcntl
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        fd.close()
+
+
 def load_state() -> dict:
     if STATE_FILE.exists():
         try:
@@ -52,18 +94,53 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp = STATE_FILE.with_suffix(f'.tmp.{os.getpid()}')
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning(f"traffic state 저장 실패: {e}")
 
 
 def reset_if_new_day() -> None:
-    """날짜가 바뀌었으면 일일 누적 리셋."""
-    state = load_state()
-    if state.get('date') != _today():
-        state = {"date": _today(), "bytes": 0, "chapters": 0, "last_exceeded_at": None}
-        save_state(state)
-        logger.info(f"traffic guard: 새 일자({_today()}) 리셋")
+    """날짜가 바뀌었으면 일일 누적 리셋.
+
+    [WHY] 보정계수는 '전일 총량' 기준으로 1일 1회 갱신한다(단구간 노이즈 차단).
+    이를 위해 리셋 직전 전일 totals 를 prev_day 로 보존한다.
+    """
+    lock = _state_lock()
+    try:
+        state = load_state()
+        if state.get('date') != _today():
+            prev = {
+                "date": state.get('date'),
+                "bytes": int(state.get('bytes', 0)),
+                "chapters": int(state.get('chapters', 0)),
+            }
+            state = {
+                "date": _today(),
+                "bytes": 0,
+                "chapters": 0,
+                "last_exceeded_at": None,
+                "check_count": 0,
+                "prev_day": prev,
+                # 보정계수/SPC 등은 날짜 무관하게 유지
+                "calibration_factor_ewma": state.get('calibration_factor_ewma'),
+                "calibration_factor_raw": state.get('calibration_factor_raw'),
+                "calibration_spc": state.get('calibration_spc'),
+                "calibration_last_day": state.get('calibration_last_day'),
+            }
+            save_state(state)
+            logger.info(f"traffic guard: 새 일자({_today()}) 리셋 (prev_day {prev['date']} {prev['bytes']/1024/1024:.1f}MB 보존)")
+    finally:
+        _state_unlock(lock)
+
+
+def get_prev_day() -> Optional[dict]:
+    """전일 totals 반환 {date, bytes, chapters} (없으면 None)."""
+    try:
+        return load_state().get('prev_day')
+    except Exception:
+        return None
 
 
 def current_bytes() -> int:
@@ -72,12 +149,16 @@ def current_bytes() -> int:
 
 def add_bytes(n: int, chapter: bool = False) -> dict:
     """다운로드 바이트 누적. chapter=True면 회차 수도 증가."""
-    state = load_state()
-    state['bytes'] = int(state.get('bytes', 0)) + max(0, int(n))
-    if chapter:
-        state['chapters'] = int(state.get('chapters', 0)) + 1
-    save_state(state)
-    return state
+    lock = _state_lock()
+    try:
+        state = load_state()
+        state['bytes'] = int(state.get('bytes', 0)) + max(0, int(n))
+        if chapter:
+            state['chapters'] = int(state.get('chapters', 0)) + 1
+        save_state(state)
+        return state
+    finally:
+        _state_unlock(lock)
 
 
 def remaining_bytes() -> int:
@@ -105,4 +186,254 @@ def summary() -> dict:
         "remaining_mb": round(max(0, limit - used) / (1024 * 1024), 2),
         "exceeded": used >= limit,
         "chapters": int(load_state().get('chapters', 0)),
+    }
+
+
+def get_check_count() -> int:
+    """DataImpulse 체크 카운터 조회 (재시작 시 유지)."""
+    return int(load_state().get('check_count', 0))
+
+
+def increment_check_count() -> int:
+    """DataImpulse 체크 카운터 증가 및 저장. 10 도달 시 0으로 리셋 후 0 반환."""
+    lock = _state_lock()
+    try:
+        state = load_state()
+        count = int(state.get('check_count', 0)) + 1
+        if count >= 10:
+            count = 0
+        state['check_count'] = count
+        save_state(state)
+        return count
+    finally:
+        _state_unlock(lock)
+
+
+def _load_calibration_factor() -> float:
+    """API 비교 데이터에서 보정 계수 로드 (최신 비교 기준)."""
+    try:
+        if API_STATE_FILE.exists():
+            data = json.loads(API_STATE_FILE.read_text(encoding='utf-8'))
+            comparisons = data.get('comparisons', [])
+            if comparisons:
+                latest = comparisons[-1]
+                api_mb = latest.get('api_mb', 0)
+                tg_mb = latest.get('tg_mb', 0)
+                if tg_mb > 0:
+                    factor = api_mb / tg_mb
+                    # 합리적 범위 클램프
+                    return max(MIN_CALIBRATION_FACTOR, min(MAX_CALIBRATION_FACTOR, factor))
+    except Exception as e:
+        logger.debug(f"보정 계수 로드 실패, 기본값 사용: {e}")
+    return DEFAULT_CALIBRATION_FACTOR
+
+
+def get_calibration_factor() -> float:
+    """현재 EWMA 보정 계수 반환 (traffic_state.json에서 로드)."""
+    try:
+        state = load_state()
+        ewma = state.get('calibration_factor_ewma')
+        if ewma is not None:
+            return float(ewma)
+    except Exception:
+        pass
+    return DEFAULT_CALIBRATION_FACTOR
+
+
+def _update_calibration_factor_ewma(latest_factor: float) -> float:
+    """EWMA 보정 계수 갱신 + SPC 경고 (중심선 = 이동 EWMA).
+
+    [WHY] 보정계수는 일 단위로 정당하게 이동하므로 '고정 기준선'은 가짜 이상을
+    만든다. 중심선을 EWMA로 두어, 한 샘플(raw)이 현재 EWMA의 ±20%를 벗어나거나
+    ±5% 데드밴드 밖에서 5연속 같은 방향이면 경고한다.
+    자동중지(emergency)는 기본 비활성(경고만). 필요 시 EBOOK_CALIBRATION_AUTOSTOP=1.
+    """
+    autostop = os.getenv('EBOOK_CALIBRATION_AUTOSTOP', '0').lower() in ('1', 'true', 'yes')
+
+    lock = _state_lock()
+    try:
+        state = load_state()
+        prev_ewma = state.get('calibration_factor_ewma')
+
+        latest_clamped = max(CALIBRATION_MIN, min(CALIBRATION_MAX, latest_factor))
+        if prev_ewma is None:
+            new_ewma = latest_clamped
+        else:
+            new_ewma = CALIBRATION_ALPHA * latest_clamped + (1 - CALIBRATION_ALPHA) * prev_ewma
+        new_ewma = max(CALIBRATION_MIN, min(CALIBRATION_MAX, new_ewma))
+
+        # 중심선 = 이동 EWMA (매 갱신마다 추종 → 정당한 이동은 이상 아님)
+        cl = new_ewma
+        ucl = cl * SPC_UCL_MULTIPLIER
+        lcl = cl * SPC_LCL_MULTIPLIER
+
+        spc = state.get('calibration_spc', {})
+        beyond_ucl = spc.get('beyond_ucl', 0)
+        beyond_lcl = spc.get('beyond_lcl', 0)
+        same_side_ref = spc.get('same_side_ref', 0)
+        warning_count = spc.get('warning_count', 0)
+
+        # Rule 1: raw 가 중심선 ±20% 밖
+        rule1 = False
+        if latest_clamped > ucl:
+            rule1 = True; beyond_ucl += 1; beyond_lcl = 0
+            logger.warning(f"⚠️ SPC Rule 1: UCL 초과 | raw={latest_clamped:.4f} CL={cl:.4f} (+{((latest_clamped/cl)-1)*100:.1f}%)")
+        elif latest_clamped < lcl:
+            rule1 = True; beyond_lcl += 1; beyond_ucl = 0
+            logger.warning(f"⚠️ SPC Rule 1: LCL 미만 | raw={latest_clamped:.4f} CL={cl:.4f} ({((latest_clamped/cl)-1)*100:.1f}%)")
+        else:
+            beyond_ucl = 0; beyond_lcl = 0
+
+        # Rule 2: 데드밴드(±5%) 밖에서 같은 방향 연속
+        pct = ((latest_clamped / cl) - 1) * 100
+        if pct > SPC_RULE2_DEADBAND_PCT:
+            same_side_ref = max(0, same_side_ref) + 1
+        elif pct < -SPC_RULE2_DEADBAND_PCT:
+            same_side_ref = min(0, same_side_ref) - 1
+        else:
+            same_side_ref = 0
+        rule2 = abs(same_side_ref) >= SPC_RULE2_CONSECUTIVE
+        if rule2:
+            logger.warning(f"⚠️ SPC Rule 2: CL 편향 {abs(same_side_ref)}연속 | raw={latest_clamped:.4f} CL={cl:.4f} ({pct:+.1f}%)")
+
+        # Rule 3: 경고 누적
+        warning_count = min(5, warning_count + 1) if (rule1 or rule2) else max(0, warning_count - 1)
+        if warning_count >= SPC_RULE3_WARNING_THRESHOLD:
+            if autostop:
+                state['calibration_emergency_stop'] = True
+                logger.critical(f"🚨 SPC Rule 3: 경고 누적 {warning_count} — 자동중지 플래그 설정(autostop=on)")
+            else:
+                logger.warning(f"⚠️ SPC Rule 3: 경고 누적 {warning_count} — 경고만(autostop=off)")
+
+        spc.update({
+            'beyond_ucl': beyond_ucl, 'beyond_lcl': beyond_lcl,
+            'same_side_ref': same_side_ref, 'warning_count': warning_count,
+            'ref_baseline': cl, 'last_ucl': ucl, 'last_lcl': lcl,
+        })
+        state.pop('calibration_spc_ref_baseline', None)  # 구 고정 기준선 제거
+        state['calibration_factor_ewma'] = round(new_ewma, 4)
+        state['calibration_factor_raw'] = round(latest_clamped, 4)
+        state['calibration_updated'] = time.time()
+        state['calibration_spc'] = spc
+        save_state(state)
+
+        logger.info(f"SPC 갱신: CL={cl:.4f} UCL={ucl:.4f} LCL={lcl:.4f} | raw={latest_clamped:.4f} EWMA={new_ewma:.4f} | 경고={warning_count}")
+        return new_ewma
+
+    finally:
+        _state_unlock(lock)
+
+
+def get_calibration_factor() -> float:
+    """현재 EWMA 보정 계수 반환 (traffic_state.json에서 로드)."""
+    try:
+        state = load_state()
+        ewma = state.get('calibration_factor_ewma')
+        if ewma is not None:
+            return float(ewma)
+    except Exception:
+        pass
+    return DEFAULT_CALIBRATION_FACTOR
+
+
+def is_calibration_emergency() -> bool:
+    """보정 계수 비상 중지 플래그 확인.
+    
+    5회 연속 20% 이상 급변 감지 시 True 반환.
+    파이프라인에서 호출하여 비상 중지 결정에 사용.
+    """
+    try:
+        state = load_state()
+        return bool(state.get('calibration_emergency_stop', False))
+    except Exception:
+        return False
+
+
+def clear_calibration_emergency() -> None:
+    """비상 중지 플래그 해제 (사용자 개입 후 수동 호출)."""
+    lock = _state_lock()
+    try:
+        state = load_state()
+        state['calibration_emergency_stop'] = False
+        state['calibration_consecutive_spikes'] = 0
+        save_state(state)
+        logger.info("보정 계수 비상 중지 플래그 해제됨")
+    finally:
+        _state_unlock(lock)
+
+
+def current_bytes_calibrated() -> int:
+    """보정 적용된 현재 바이트 (TG×보정계수, API 불가 시 폴백 근사치)."""
+    raw = current_bytes()
+    factor = get_calibration_factor()
+    return int(raw * factor)
+
+
+# API 일일 실측값 신선도 한계 (초). monitor가 매 화 갱신하므로 15분이면 충분히 신선.
+API_FRESH_SEC = 900
+
+
+def api_daily_used_mb() -> Optional[float]:
+    """DataImpulse API의 '오늘' 실측 사용량(MB). 신선하지 않으면 None.
+
+    [WHY] DataImpulse 과금의 SSOT는 API 실측값이다. TG×보정계수는 근사치이므로
+    API 값이 신선하면 한도 판정에 API를 우선 사용한다. (일 경계: 서버 TZ=UTC,
+    API group_date=UTC → 정합)
+    """
+    try:
+        if not API_STATE_FILE.exists():
+            return None
+        data = json.loads(API_STATE_FILE.read_text(encoding='utf-8'))
+        last = data.get('last_api_data') or {}
+        ts = float(data.get('last_check') or 0)
+        mb = last.get('total_mb')
+        if mb is None or (time.time() - ts) > API_FRESH_SEC:
+            return None
+        return float(mb)
+    except Exception:
+        return None
+
+
+def effective_used_bytes() -> tuple[int, str]:
+    """한도 판정용 유효 사용량 (바이트, 출처).
+
+    우선순위: API 오늘 실측 → TG×보정계수(폴백).
+    """
+    api_mb = api_daily_used_mb()
+    if api_mb is not None:
+        return int(api_mb * 1024 * 1024), "api"
+    return current_bytes_calibrated(), "tg_calibrated"
+
+
+def remaining_bytes_calibrated() -> int:
+    """잔여 바이트 (유효 사용량 기준)."""
+    used, _ = effective_used_bytes()
+    return max(0, daily_limit_bytes() - used)
+
+
+def is_exceeded_calibrated() -> bool:
+    """일일 한도 초과 여부 — API 실측 우선, TG×보정계수 폴백."""
+    used, _ = effective_used_bytes()
+    return used >= daily_limit_bytes()
+
+
+def summary_calibrated() -> dict:
+    """상태 요약 — API 실측 우선, TG 원시/보정 병기."""
+    limit = daily_limit_bytes()
+    used_raw = current_bytes()
+    used_tg_cal = current_bytes_calibrated()
+    api_mb = api_daily_used_mb()
+    used_effective, source = effective_used_bytes()
+    factor = get_calibration_factor()
+    return {
+        "daily_limit_mb": get_daily_limit_mb(),
+        "used_mb": round(used_effective / (1024 * 1024), 2),
+        "used_mb_source": source,  # "api" | "tg_calibrated"
+        "used_mb_api": round(api_mb, 2) if api_mb is not None else None,
+        "used_mb_tg_calibrated": round(used_tg_cal / (1024 * 1024), 2),
+        "used_mb_raw": round(used_raw / (1024 * 1024), 2),
+        "remaining_mb": round(max(0, limit - used_effective) / (1024 * 1024), 2),
+        "exceeded": used_effective >= limit,
+        "chapters": int(load_state().get('chapters', 0)),
+        "calibration_factor": round(factor, 3),
     }
