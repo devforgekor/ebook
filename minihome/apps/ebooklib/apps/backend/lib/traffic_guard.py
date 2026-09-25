@@ -14,6 +14,7 @@ DataImpulse는 GB당 과금. 과소진 방지를 위해 실제 다운로드 바�
 
 import json
 import logging
+import math
 import os
 import time
 from typing import Optional
@@ -48,10 +49,18 @@ SPC_RULE3_WARNING_THRESHOLD = 4   # Rule 3: 경고 누적 임계치 (비상중�
 
 # 버킷 소비 급증 안전망 — 웜 기준선(회차당 KB) 대비
 # [WHY] 회차별 값은 부정확하지만(콜드/캐시/사이트 변동) 버킷 누적은 안정적이다.
-BUCKET_ANOMALY_DEV_PCT = 20.0     # 기준선 대비 +20% 초과 = 1회 경고
-BUCKET_ANOMALY_CONSECUTIVE = 5    # 5연속 초과 = 파이프라인 중지
-BUCKET_ANOMALY_MIN_SAMPLES = 3    # 기준선 EWMA 최소 표본(판정 시작)
-BUCKET_ANOMALY_ALPHA = 0.2        # 기준선 EWMA 가중치
+BUCKET_ANOMALY_DEV_PCT = 20.0            # 상대 하한: 기준선 대비 +20%
+BUCKET_ANOMALY_MIN_KB = 5.0              # 절대 하한: +5KB/화 (AND; 소량 버킷 %노이즈 차단)
+BUCKET_ANOMALY_UCL_K = 3.0               # NIST EWMA UCL 계수 (CL + k·s·√(λ/(2−λ)))
+BUCKET_ANOMALY_ALERT_CONSECUTIVE = 3     # 3연속 = 경보(alert)
+BUCKET_ANOMALY_CONSECUTIVE = 5           # 5연속 = 중지(stop)
+BUCKET_ANOMALY_SEVERE_PCT = 50.0         # 심각 편차(%)
+BUCKET_ANOMALY_SEVERE_CONSECUTIVE = 2    # 심각 편차 2연속 = 조기 중지
+BUCKET_ANOMALY_MIN_SAMPLES = 3           # 기준선 EWMA 최소 표본(판정 시작)
+BUCKET_ANOMALY_ALPHA = 0.2               # 기준선 EWMA 가중치
+
+# 예측(forecast) 경보 — 산업 표준(예산 예측 초과 경보) 정합
+FORECAST_MIN_ELAPSED_SEC = 3600          # 최소 경과(1h) 이전 예측은 폭주하므로 생략
 
 
 def get_daily_limit_mb() -> int:
@@ -337,15 +346,15 @@ def clear_calibration_emergency() -> None:
 
 
 def update_bucket_anomaly(kb_per_chapter: float, event_id: Optional[str] = None) -> dict:
-    """완료된 웜 버킷의 회차당 KB를 기준선(EWMA)과 비교해 소비 급증을 감시.
+    """완료된 웜 버킷의 회차당 KB를 진화 기준선(EWMA)과 비교해 소비 급증을 감시.
 
-    [WHY] 회차별 값은 부정확하지만(콜드/캐시/사이트 변동) 버킷 누적은 안정적이다.
-    기준선 대비 +BUCKET_ANOMALY_DEV_PCT% 초과가 BUCKET_ANOMALY_CONSECUTIVE회 연속이면
-    `bucket_anomaly_stop` 플래그를 세워 파이프라인을 중지한다(안전망). 기준선은 정상
-    범위 샘플만 반영해 급증이 기준선을 끌어올리지 않게 한다.
-
-    event_id가 주어지면 같은 버킷을 중복 평가하지 않는다(5분 주기 호출에서 streak
-    중복 누적 방지) — "20%가 중복되면 안 된다".
+    판정(표준 정합):
+    - 상대 하한 +BUCKET_ANOMALY_DEV_PCT% **그리고** 절대 하한 +BUCKET_ANOMALY_MIN_KB
+      **그리고** σ 기반 UCL(CL + k·s·√(λ/(2−λ)), NIST) 초과 → 이상.
+    - 경보(alert) = ALERT_CONSECUTIVE 연속, 중지(stop) = CONSECUTIVE 연속 또는
+      심각 편차(≥ SEVERE_PCT)가 SEVERE_CONSECUTIVE 연속(조기 중지).
+    - 기준선은 정상 샘플만 반영 → 급증이 기준선을 끌어올리지 않는다(20% 중복 누적 방지).
+    - event_id 중복 평가 금지(5분 주기 streak 중복 방지).
     """
     lock = _state_lock()
     try:
@@ -354,50 +363,91 @@ def update_bucket_anomaly(kb_per_chapter: float, event_id: Optional[str] = None)
             return {"skipped": True, "event_id": event_id}
 
         baseline = state.get('bucket_kb_ewma')
+        var = state.get('bucket_kb_var_ewma')
         samples = int(state.get('bucket_samples', 0))
         streak = int(state.get('bucket_anomaly_streak', 0))
         value = max(0.0, float(kb_per_chapter))
 
         result = {
             "value": round(value, 2),
-            "baseline": round(float(baseline), 2) if baseline is not None else None,
+            "baseline": None,
             "dev_pct": None,
+            "abs_kb": None,
+            "sigma": None,
             "streak": streak,
+            "alert": False,
             "stop": False,
         }
 
         if samples < BUCKET_ANOMALY_MIN_SAMPLES:
+            base = float(baseline) if baseline is not None else value
+            var = (
+                (value - base) ** 2
+                if var is None
+                else BUCKET_ANOMALY_ALPHA * (value - base) ** 2
+                + (1 - BUCKET_ANOMALY_ALPHA) * float(var)
+            )
             baseline = (
                 value
                 if baseline is None
                 else BUCKET_ANOMALY_ALPHA * value
-                + (1 - BUCKET_ANOMALY_ALPHA) * float(baseline)
+                + (1 - BUCKET_ANOMALY_ALPHA) * base
             )
             samples += 1
         else:
             base = float(baseline)
             dev = ((value / base) - 1) * 100 if base > 0 else 0.0
-            result["baseline"] = round(base, 2)
-            result["dev_pct"] = round(dev, 1)
-            if dev > BUCKET_ANOMALY_DEV_PCT:
+            abs_kb = value - base
+            sigma = math.sqrt(max(var, 0.0)) if var is not None else None
+            s_eff = (
+                sigma * math.sqrt(BUCKET_ANOMALY_ALPHA / (2 - BUCKET_ANOMALY_ALPHA))
+                if sigma is not None
+                else None
+            )
+            rel_floor = base * (1 + BUCKET_ANOMALY_DEV_PCT / 100)
+            ucl = base + BUCKET_ANOMALY_UCL_K * s_eff if s_eff is not None else rel_floor
+            threshold = max(rel_floor, ucl)
+            is_anomaly = value > threshold and abs_kb >= BUCKET_ANOMALY_MIN_KB
+            result.update(
+                {
+                    "baseline": round(base, 2),
+                    "dev_pct": round(dev, 1),
+                    "abs_kb": round(abs_kb, 2),
+                    "sigma": round(sigma, 3) if sigma is not None else None,
+                }
+            )
+            if is_anomaly:
                 streak += 1
                 logger.warning(
                     f"⚠️ 버킷 소비 급증 {streak}/{BUCKET_ANOMALY_CONSECUTIVE}: "
-                    f"{value:.1f}KB/화 (기준선 {base:.1f}, {dev:+.1f}%)"
+                    f"{value:.1f}KB/화 (기준선 {base:.1f}, {dev:+.1f}%, +{abs_kb:.1f}KB)"
                 )
             else:
                 streak = 0
+                var = (
+                    BUCKET_ANOMALY_ALPHA * (value - base) ** 2
+                    + (1 - BUCKET_ANOMALY_ALPHA) * float(var)
+                    if var is not None
+                    else (value - base) ** 2
+                )
                 baseline = (
                     BUCKET_ANOMALY_ALPHA * value + (1 - BUCKET_ANOMALY_ALPHA) * base
                 )
-            if streak >= BUCKET_ANOMALY_CONSECUTIVE:
+            severe = dev >= BUCKET_ANOMALY_SEVERE_PCT
+            if streak >= BUCKET_ANOMALY_ALERT_CONSECUTIVE:
+                result["alert"] = True
+            if streak >= BUCKET_ANOMALY_CONSECUTIVE or (
+                severe and streak >= BUCKET_ANOMALY_SEVERE_CONSECUTIVE
+            ):
                 state['bucket_anomaly_stop'] = True
                 result["stop"] = True
                 logger.critical(
-                    f"🚨 버킷 소비 급증 {streak}연속 — 파이프라인 중지 플래그 설정"
+                    f"🚨 버킷 소비 급증 {streak}연속(편차 {dev:+.1f}%) — 파이프라인 중지 플래그 설정"
                 )
 
         state['bucket_kb_ewma'] = round(float(baseline), 4)
+        if var is not None:
+            state['bucket_kb_var_ewma'] = round(float(var), 6)
         state['bucket_samples'] = samples
         state['bucket_anomaly_streak'] = streak
         state['bucket_anomaly_updated'] = time.time()
@@ -499,15 +549,33 @@ QUOTA_WARN_PCT = 0.80
 QUOTA_HARD_PCT = 0.95
 
 
+def forecast_used_mb(at: Optional[float] = None) -> Optional[float]:
+    """현재 속도로 하루를 채울 때의 예상 사용량(MB). 1h 미만 경과 시 None.
+
+    [WHY] 산업 표준(Azure/GCP)은 실제값뿐 아니라 **예측 초과**를 경보한다.
+    """
+    used, _ = guard_used_bytes()
+    dt = datetime.fromtimestamp(at) if at is not None else datetime.now()
+    midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = (dt - midnight).total_seconds()
+    if elapsed < FORECAST_MIN_ELAPSED_SEC:
+        return None
+    return used / (elapsed / 86400) / (1024 * 1024)
+
+
 def quota_level() -> str:
-    """예산 단계 — 한도 차단용(보수적) 사용량 기준 ok/warn(80%)/critical(95%)."""
+    """예산 단계 — 보수적 사용량과 예측의 최악값 기준 ok/warn(80%)/critical(95%)."""
     used, _ = guard_used_bytes()
     limit = daily_limit_bytes()
     if limit <= 0:
         return "ok"
-    if used >= limit * QUOTA_HARD_PCT:
+    worst = used / limit
+    forecast_mb = forecast_used_mb()
+    if forecast_mb is not None:
+        worst = max(worst, forecast_mb * 1024 * 1024 / limit)
+    if worst >= QUOTA_HARD_PCT:
         return "critical"
-    if used >= limit * QUOTA_WARN_PCT:
+    if worst >= QUOTA_WARN_PCT:
         return "warn"
     return "ok"
 
@@ -540,6 +608,9 @@ def summary_calibrated() -> dict:
         "used_mb_guard": round(used_guard / (1024 * 1024), 2),
         "used_mb_guard_source": guard_source,
         "quota_level": quota_level(),
+        "forecast_mb": (
+            round(forecast_used_mb(), 2) if forecast_used_mb() is not None else None
+        ),
         "used_mb_api": round(api_mb, 2) if api_mb is not None else None,
         "used_mb_tg_calibrated": round(used_tg_cal / (1024 * 1024), 2),
         "used_mb_raw": round(used_raw / (1024 * 1024), 2),

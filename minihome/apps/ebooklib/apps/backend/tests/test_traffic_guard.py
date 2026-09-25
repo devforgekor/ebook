@@ -215,6 +215,7 @@ class TestGapSafety:
     def test_quota_level_thresholds(self, state, monkeypatch):
         monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "1")
         monkeypatch.setattr(tg, "API_STATE_FILE", state.parent / "none.json")
+        monkeypatch.setattr(tg, "forecast_used_mb", lambda at=None: None)
         tg.save_state(
             {
                 "date": tg._today(),
@@ -253,11 +254,60 @@ class TestBucketAnomaly:
     def test_should_reset_streak_on_normal_value(self, state):
         for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
             tg.update_bucket_anomaly(100.0)
-        tg.update_bucket_anomaly(200.0)
-        tg.update_bucket_anomaly(200.0)
+        tg.update_bucket_anomaly(130.0)
+        tg.update_bucket_anomaly(130.0)
         tg.update_bucket_anomaly(100.0)  # 정상 → streak 0
-        assert tg.update_bucket_anomaly(200.0)["streak"] == 1
+        assert tg.update_bucket_anomaly(130.0)["streak"] == 1
         assert tg.is_bucket_anomaly_stop() is False
+
+    def test_should_ignore_small_absolute_increase(self, state):
+        # +30%지만 절대 증가가 MIN_KB 미만이면 이상 아님(소량 버킷 %노이즈 차단)
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(1.0)
+        r = tg.update_bucket_anomaly(1.3)
+        assert r["dev_pct"] == 30.0
+        assert r["streak"] == 0
+
+    def test_should_alert_before_stop(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        r = None
+        for _ in range(tg.BUCKET_ANOMALY_ALERT_CONSECUTIVE):
+            r = tg.update_bucket_anomaly(130.0)
+        assert r["alert"] is True
+        assert r["stop"] is False
+        assert tg.is_bucket_anomaly_stop() is False
+
+    def test_should_stop_early_on_severe_deviation(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        for _ in range(tg.BUCKET_ANOMALY_SEVERE_CONSECUTIVE):
+            r = tg.update_bucket_anomaly(160.0)  # +60%
+        assert r["stop"] is True
+
+
+class TestForecast:
+    def test_should_extrapolate_daily_usage(self, state, api_state, monkeypatch):
+        from datetime import datetime, timezone
+
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "100")
+        tg.save_state(
+            {
+                "date": tg._today(),
+                "bytes": 10 * 1024 * 1024,
+                "chapters": 1,
+                "calibration_factor_ewma": 1.0,
+            }
+        )
+        noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        assert tg.forecast_used_mb(at=noon.timestamp()) == 20.0
+
+    def test_should_return_none_before_min_elapsed(self, state, api_state, monkeypatch):
+        from datetime import datetime, timezone
+
+        monkeypatch.setenv("EBOOK_DAILY_TRAFFIC_LIMIT_MB", "100")
+        early = datetime.now(timezone.utc).replace(hour=0, minute=30, second=0, microsecond=0)
+        assert tg.forecast_used_mb(at=early.timestamp()) is None
 
     def test_clear_should_release_stop(self, state):
         for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):

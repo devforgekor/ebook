@@ -1202,12 +1202,16 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
         )
         return {"processed": 0, "errors": [], "remaining": len(_load_queue()), "traffic_exceeded": True}
 
-    if traffic_limited and quota_level() == "warn":
-        s_warn = summary_calibrated()
-        log.warning(
-            f"  ⚠️ 일일 트래픽 한도 근접 ({s_warn.get('used_mb_guard')}MB/{s_warn['daily_limit_mb']}MB, "
-            f"계수 {s_warn['calibration_factor']}x, source={s_warn.get('used_mb_guard_source')})"
-        )
+    if traffic_limited:
+        _qlevel = quota_level()
+        if _qlevel in ("warn", "critical"):
+            s_q = summary_calibrated()
+            _msg = (
+                f"  {'🚨' if _qlevel == 'critical' else '⚠️'} 일일 트래픽 한도 근접({_qlevel}) "
+                f"({s_q.get('used_mb_guard')}MB/{s_q['daily_limit_mb']}MB, 계수 {s_q['calibration_factor']}x, "
+                f"예측 {s_q.get('forecast_mb')}MB, source={s_q.get('used_mb_guard_source')})"
+            )
+            (log.critical if _qlevel == "critical" else log.warning)(_msg)
 
     full_queue = _load_queue()
     if not full_queue:
