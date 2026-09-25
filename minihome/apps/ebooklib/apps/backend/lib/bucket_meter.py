@@ -441,9 +441,13 @@ def _metric_median(facts: Sequence[dict], metric: str) -> float | None:
     vals: list[float] = []
     for f in facts:
         chapters = f.get("consumed_chapters") or 0
-        if metric == "api_kb_per_chapter":
-            if f.get("quality") == QUALITY_OK and f.get("api_mb_delta") and chapters:
-                vals.append(f["api_mb_delta"] * _KB / chapters)
+        if (
+            metric == "api_kb_per_chapter"
+            and f.get("quality") == QUALITY_OK
+            and f.get("api_mb_delta")
+            and chapters
+        ):
+            vals.append(f["api_mb_delta"] * _KB / chapters)
         elif metric == "tg_kb_per_chapter" and chapters and f["tg_bytes_delta"] > 0:
             vals.append(f["tg_bytes_delta"] / _KB / chapters)
         elif metric == "r":
