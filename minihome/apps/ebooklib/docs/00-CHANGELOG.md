@@ -2,6 +2,38 @@
 
 > ebooklib의 모든 주요 변경 사항. 최신이 위.
 
+## 2026-09-23 (DataImpulse 공식 API 모니터 + MaskProxy 제거 + 제목 정규화)
+
+### DataImpulse 모니터: Playwright 스크래핑 → 공식 API
+- `lib/dataimpulse_monitor.py` 재작성 — `https://gw.dataimpulse.com:777` (`/api/stats`, `/api/stats_with_history`), Basic Auth
+- 60초/10화 제한 → **<1초 / 매 화 호출**. 대시보드(SPA) 로그인 불가 문제 해소
+- 과거 monitor가 프록시로 대시보드를 로드해 **자체 트래픽을 발생**시키던 문제 제거
+
+### 트래픽 한도 SSOT = API 실측
+- `traffic_guard`: 일일 한도를 **API '오늘' 실측값 우선** 판정(`used_mb_source=api`), 폴백 TG×보정계수
+- 보정계수 재설정: 기존 1.59는 구 monitor 자체 트래픽으로 오염 → 실측 API/TG ≈ 0.75~0.86 → **기본 0.85, 클램프 0.5~3.0**
+- 보정계수 갱신을 **'가장 최근 완료된 수집일' 총량 기준 1일 1회**로 제한 (단구간 비단조·청크 노이즈 차단). `traffic_guard`가 리셋 시 `prev_day` 스냅샷 보존
+- SPC: 중심선을 **이동 EWMA**로(고정 기준선 제거), **자동중지 기본 OFF**(경고만). `EBOOK_CALIBRATION_AUTOSTOP=1`로 활성
+
+### MaskProxy 제거
+- toki31에서 MaskProxy 폴백 삭제(407로 통과 불가): `_PROXY_PRIORITY`/`_PROXY_DEFAULTS` 제거 → **DataImpulse 단일**
+- KV 시크릿: 유지 `DATAIMPULSE-PROXY-KEY/API-KEY`, `MASKPROXY-PROXY-KEY/API-KEY`; 삭제·purge `DATAIMPULSE-LOGIN/PASS/HOST/PORT`, `MASKPROXY-USER/PASS/HOST/PORT`
+- `_load_proxy_env`: 개별 PASS 없이도 결합형 `PROXY-KEY`에서 PASS/HOST/PORT 채우도록 수정
+
+### 제목 정규화 (중복 디렉터리 방지)
+- `_normalize_toki_title()` 추가 — `"제목 - 작가 | 사이트"` → `"제목"` (discover_toki31에 적용)
+- 기존 접미사 디렉터리 rename + DB 동기화: `동생이_천재였다_-_시하_|_뉴토끼`→`동생이_천재였다`, `필드의_고인물_-_이블라인_|_뉴토끼`→`필드의_고인물`
+
+### 보안 / 시크릿
+- `apps/backend/.env` 평문 → KV(`EBOOK-ADMIN-PASSWORD`, `EBOOK-CORS-ORIGINS`) 이관 후 삭제; **하드코딩 관리자 비밀번호 제거**
+- 관리자 인증 **서버측 검증**으로 전환 (`POST /api/pipeline/auth`, username=`admin`) — 프론트 하드코딩 제거
+- `scripts/deploy/kv-safe.py` 신규: 시크릿 값 비노출 도구(list/compare/set)
+
+### 버그 수정
+- `pipeline.py` NameError(`s`→`s_raw`/`s_cal`) 수정
+- stale `pipeline.py collect` 고아 프로세스가 collect 락을 점유해 watcher 정체 → 제거
+- DB 고아 `chapters`(디렉터리 없는 옛 id) 정리로 `migrate_json_to_sqlite.py` UNIQUE 충돌 해소
+
 ## 2026-09-15 (성인 카테고리 + 표지 SSOT 로직 + 터치 스크롤)
 
 ### 성인(adult) 카테고리 추가

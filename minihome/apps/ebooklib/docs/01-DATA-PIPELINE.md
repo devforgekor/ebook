@@ -120,10 +120,12 @@ result = await fetch_chapter_content_full(novel_id, episode_id)
 # (venv에 playwright + cryptography 필요)
 ```
 
-> **toki31 프록시/트래픽 (2026-09-12)**:
-> - 프록시: **DataImpulse 주력**(`__cr.kr` 한국 IP 회전) + MaskProxy 폴백 (`_PROXY_PRIORITY`)
-> - 회차당 실측 **~0.9~1.6MB** (toki31이 JS/wasm을 매 챕터 재다운로드 — anti-bot, 캐시 불가)
-> - 회차 상한: 콜드 2.5MB / 웜 2.0MB (정상 챕터 차단 방지용 안전장치)
+> **toki31 프록시/트래픽 (2026-09-23 갱신)**:
+> - 프록시: **DataImpulse 단일**(`__cr.kr` 한국 IP 회전). MaskProxy 폴백 제거됨
+> - **트래픽 한도 SSOT = DataImpulse 공식 API 오늘 실측값** (`traffic_guard.effective_used_bytes`), 폴백 TG×보정계수. 상세: `docs/runbooks/dataimpulse-monitor.md`
+> - 보정계수는 **최근 완료 수집일 총량 기준 1일 1회** 갱신 (단구간 비단조 노이즈 배제)
+> - 웜 회차 실측 **~185KB** (JS/wasm 로컬 캐시 재서빙 이후). 콜드 ~0.75MB
+> - 회차 상한: 콜드 1.5MB / 웜 0.8MB (안전장치)
 > - 브라우저 재사용(싱글턴) + 리소스 차단(media/CSS/이미지)으로 절약
 > - `ad_guard_bg.wasm`은 콘텐츠 추출 필수(차단 불가) — 상세: [10-TOKI31-PROXY-IMPLEMENTATION.md](10-TOKI31-PROXY-IMPLEMENTATION.md)
 
