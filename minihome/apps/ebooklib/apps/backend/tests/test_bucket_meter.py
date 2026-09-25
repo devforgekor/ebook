@@ -499,3 +499,49 @@ def test_bucket_baseline_stats_should_use_warm_buckets_only(tmp_path):
     assert stats["n"] == 2  # 첫 버킷은 콜드 포함으로 제외
     assert stats["kb_per_chapter_median"] == 201.0
     assert stats["kb_per_chapter_stdev"] > 0
+
+
+def test_compute_config_hash_should_be_deterministic_and_sensitive():
+    from lib.bucket_meter import compute_config_hash
+
+    a = compute_config_hash({"x": "1", "y": "0"})
+    assert a == compute_config_hash({"y": "0", "x": "1"})
+    assert a != compute_config_hash({"x": "1", "y": "1"})
+
+
+def test_record_bucket_facts_should_persist_idempotently_with_config_hash(tmp_path):
+    from lib.bucket_meter import (
+        latest_tg_warm_fact,
+        record_bucket_facts,
+        tg_warm_facts,
+    )
+
+    log = tmp_path / "collect.log"
+    lines = []
+
+    def add(wr, kb):
+        lines.append(f"2026-09-23 01:00:00,000 [INFO] [1/1] wr_id={wr} source=toki31 시도 1/3")
+        lines.append(f"2026-09-23 01:00:05,000 [INFO]   📊 트래픽: {kb}.0KB [웜] (누적 1MB/200MB)")
+        lines.append(f"2026-09-23 01:00:06,000 [INFO]   ✓ wr_id={wr} 저장 완료")
+
+    for wr, kb in [(1, 800), (2, 200), (3, 220)]:
+        add(wr, kb)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    state = tmp_path / "api_state.json"
+    state.write_text('{"comparisons": []}', encoding="utf-8")
+    out = tmp_path / "bucket_facts.jsonl"
+
+    facts = record_bucket_facts(
+        log, state, tmp_path / "none.jsonl", out, size=1, config_hash="abc123"
+    )
+    assert len(facts) == 3
+    assert facts[0]["config_hash"] == "abc123"
+    assert len(tg_warm_facts(facts)) == 2  # 첫 회차(콜드) 제외
+    assert latest_tg_warm_fact(facts)["tg_bytes_delta"] == 220 * 1024
+
+    first_lines = out.read_text(encoding="utf-8").splitlines()
+    record_bucket_facts(
+        log, state, tmp_path / "none.jsonl", out, size=1, config_hash="abc123"
+    )
+    assert len(out.read_text(encoding="utf-8").splitlines()) == len(first_lines)

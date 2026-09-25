@@ -126,6 +126,20 @@ def _request_headers() -> dict:
     return dict(MINIMAL_REQUEST_HEADERS) if _env_on(_MIN_HEADERS_ENV) else {}
 
 
+# ── 레벨2 절감(A/B 토글, 기본 OFF) — TRAFFIC_OPTIMIZATION_GUIDE.md §10 ──
+# 레벨1 채택 후 한 단계씩 켠다.
+_CDP_BLOCK_ENV = "EBOOK_TOK31_CDP_BLOCK"
+CDP_BLOCKED_URLS = (
+    "*://whoas.xyz/*",
+    "*://*.googletagmanager.com/*",
+    "*://*.google-analytics.com/*",
+)
+
+
+def _cdp_blocked_urls() -> list:
+    return list(CDP_BLOCKED_URLS) if _env_on(_CDP_BLOCK_ENV, default=False) else []
+
+
 def _parse_proxy_key(value: str):
     """KV 결합 프록시 키 'user:pass@host:port' → (user, pass, host, port)."""
     user = pw = host = port = ""
@@ -479,6 +493,7 @@ class Toki31Collector:
         self._consecutive_failures = 0
         self._traffic_total = 0  # 프록시로 받은 총 응답 바이트 (실측, 수명 누적)
         self._traffic_by_type: dict = {}  # resource_type → 누적 바이트 (절감 A/B 분석용)
+        self._encoding_counts: dict = {}  # content-encoding → 응답 수 (압축 검증)
         self._is_cold = True  # 브라우저 첫 로드 여부 (JS 번들 전체 다운로드 → 상한 높게)
         self._wasm_cache = {}  # ad_guard_bg.wasm url → bytes (챕터 간 재서빙)
         self._js_cache = {}  # JS 청크 url → bytes (검증: 동일 URL 내용 안정)
@@ -522,6 +537,7 @@ class Toki31Collector:
         if _headers:
             await self._context.set_extra_http_headers(_headers)
         self._page = await self._context.new_page()
+        await self._apply_cdp_block()
 
         # novel-content API 응답 리스너 (브라우저 수명 동안 1회만 등록)
         self._content_payload = {}
@@ -561,6 +577,8 @@ class Toki31Collector:
                 self._traffic_total += size
                 rtype = getattr(response, "resource_type", None) or "other"
                 self._traffic_by_type[rtype] = self._traffic_by_type.get(rtype, 0) + size
+                ce = (response.headers.get("content-encoding") or "identity").lower()
+                self._encoding_counts[ce] = self._encoding_counts.get(ce, 0) + 1
                 # 응답별 트래픽 상세 로깅 (50KB 이상 또는 API 응답)
                 if size > 50 * 1024 or '/api/' in response.url:
                     logger.info(
@@ -594,6 +612,18 @@ class Toki31Collector:
         # 불필요한 리소스 차단 (image/font/media/stylesheet → abort, 트래픽 절약)
         await self._page.route("**/*", self._block_unnecessary)
         logger.info("toki31 브라우저 시작 완료 (리소스 차단 + 재사용)")
+
+    async def _apply_cdp_block(self) -> None:
+        """레벨2: CDP Network.setBlockedURLs로 트래커 도메인을 네트워크 레벨 차단."""
+        urls = _cdp_blocked_urls()
+        if not urls:
+            return
+        try:
+            client = await self._context.new_cdp_session(self._page)
+            await client.send("Network.setBlockedURLs", {"urls": urls})
+            logger.info(f"CDP setBlockedURLs 적용: {urls}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"CDP setBlockedURLs 실패(무시): {e}")
 
     async def _block_unnecessary(self, route, request):
         """불필요한 리소스 차단 — 이미지/폰트/미디어/CSS 차단, JS만 허용.
@@ -860,6 +890,11 @@ def get_traffic_breakdown() -> dict:
     )
 
 
+def get_encoding_counts() -> dict:
+    """content-encoding별 응답 수 (압축 검증: br/zstd 비중 확인용)."""
+    return dict(_collector._encoding_counts) if _collector else {}
+
+
 def get_collector_state() -> dict:
     """현재 collector 상태 (트래픽 분석용)."""
     if not _collector:
@@ -868,6 +903,7 @@ def get_collector_state() -> dict:
         "is_cold": _collector._is_cold,
         "traffic_total": _collector._traffic_total,
         "traffic_by_type": get_traffic_breakdown(),
+        "encoding_counts": get_encoding_counts(),
         "js_cache": len(_collector._js_cache),
         "wasm_cache": len(_collector._wasm_cache),
         "js_hits": len(_collector._js_cache_hits),

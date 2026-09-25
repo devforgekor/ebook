@@ -13,9 +13,11 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from lib.toki31_playwright import (
+    CDP_BLOCKED_URLS,
     CHROMIUM_TUNING_ARGS,
     MINIMAL_REQUEST_HEADERS,
     _basic_proxy_auth,
+    _cdp_blocked_urls,
     _chromium_args,
     _inject_proxy_auth,
     _request_headers,
@@ -170,3 +172,11 @@ class TestLevel1Tuning:
     def test_should_disable_min_headers_when_off(self, monkeypatch):
         monkeypatch.setenv("EBOOK_TOK31_MIN_HEADERS", "off")
         assert _request_headers() == {}
+
+    def test_cdp_block_should_be_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("EBOOK_TOK31_CDP_BLOCK", raising=False)
+        assert _cdp_blocked_urls() == []
+
+    def test_cdp_block_should_apply_when_enabled(self, monkeypatch):
+        monkeypatch.setenv("EBOOK_TOK31_CDP_BLOCK", "1")
+        assert _cdp_blocked_urls() == list(CDP_BLOCKED_URLS)

@@ -244,7 +244,7 @@ def compare_with_traffic_guard(api_today: dict) -> dict:
     return result
 
 
-def _maybe_calibrate_daily(api_data: dict) -> None:
+def _maybe_calibrate_daily(api_data: dict, bucket_ratio: "Optional[float]" = None) -> None:
     """보정계수를 '가장 최근 완료된 수집일' 총량 기준으로 1일 1회 갱신.
 
     [WHY] DataImpulse API 카운터는 단구간(수십 화)에서 비단조·청크 갱신이라
@@ -264,16 +264,9 @@ def _maybe_calibrate_daily(api_data: dict) -> None:
     if state.get('calibration_last_day') == day:
         return  # 이 수집일은 이미 보정함
 
-    # ① 버킷 중앙값 r (완결·웜) 우선 — 단구간 노이즈에 강함
-    ratio = None
-    ratio_source = None
-    try:
-        from lib.bucket_meter import bucket_ratio_median
-
-        ratio = bucket_ratio_median()
-        ratio_source = "bucket_median"
-    except Exception as e:
-        logger.debug(f"버킷 r 중앙값 계산 실패(폴백): {e}")
+    # ① 버킷 중앙값 r (완결·웜) 우선 — 단구간 노이즈에 강함(호출자가 전달)
+    ratio = bucket_ratio
+    ratio_source = "bucket_median" if bucket_ratio is not None else None
 
     # ② 폴백: 전일 총량비 (prev_day)
     if ratio is None:
@@ -334,12 +327,18 @@ def check_dataimpulse_sync() -> dict:
     except Exception as e:
         logger.debug(f"원시 스냅샷 기록 실패(무시): {e}")
 
-    # 버킷 소비 급증 안전망 — 완결·웜 버킷 회차당 KB vs 진화 기준선(중복 평가 방지)
+    # 버킷: 팩트 계산+영속(1회), 소비 급증 안전망, 기준선 시딩
+    bucket_facts = []
+    bucket_ratio = None
     try:
         from lib.bucket_meter import (
-            bucket_baseline_stats,
+            DEFAULT_BUCKET_SIZE,
+            bucket_ratio_median_from_facts,
+            compute_config_hash,
             kb_per_chapter,
-            latest_completed_warm_bucket,
+            latest_tg_warm_fact,
+            record_bucket_facts,
+            tg_baseline_stats_from_facts,
         )
         from lib.traffic_guard import (
             get_bucket_baseline,
@@ -347,15 +346,24 @@ def check_dataimpulse_sync() -> dict:
             update_bucket_anomaly,
         )
 
-        # 초기 기준선은 과거 완결·웜 버킷에서 1회 시딩(콜드는 제외됨)
+        flags = {
+            "launch_tuning": os.getenv("EBOOK_TOK31_LAUNCH_TUNING", "1"),
+            "min_headers": os.getenv("EBOOK_TOK31_MIN_HEADERS", "1"),
+            "cdp_block": os.getenv("EBOOK_TOK31_CDP_BLOCK", "0"),
+            "bucket_size": str(DEFAULT_BUCKET_SIZE),
+        }
+        bucket_facts = record_bucket_facts(config_hash=compute_config_hash(flags))
+        bucket_ratio = bucket_ratio_median_from_facts(bucket_facts)
+
+        # 초기 기준선은 과거 완결·웜(TG) 버킷에서 1회 시딩(콜드는 제외됨)
         if get_bucket_baseline() is None:
-            stats = bucket_baseline_stats()
+            stats = tg_baseline_stats_from_facts(bucket_facts)
             if stats:
                 seed_bucket_baseline(
                     stats["kb_per_chapter_median"], stats["kb_per_chapter_stdev"]
                 )
 
-        fact = latest_completed_warm_bucket()
+        fact = latest_tg_warm_fact(bucket_facts)
         if fact is not None:
             res = update_bucket_anomaly(
                 kb_per_chapter(fact), event_id=fact.get("event_id")
@@ -365,9 +373,9 @@ def check_dataimpulse_sync() -> dict:
     except Exception as e:
         logger.debug(f"버킷 안전망 평가 실패(무시): {e}")
 
-    # 보정계수: 전일 총량 기준 1일 1회 갱신 (단구간 노이즈 차단)
+    # 보정계수: 버킷 중앙값 r(전달) 우선, 없으면 전일 총량 (1일 1회)
     try:
-        _maybe_calibrate_daily(api_data)
+        _maybe_calibrate_daily(api_data, bucket_ratio=bucket_ratio)
     except Exception as e:
         logger.debug(f"일일 보정계수 갱신 실패: {e}")
 

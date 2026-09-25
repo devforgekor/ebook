@@ -16,13 +16,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 import time
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -309,6 +310,7 @@ def _bucket_fact(
     points: Sequence[ApiPoint],
     timestamps: Sequence[float],
     source: str,
+    config_hash: str | None = None,
 ) -> dict:
     issues: list[str] = []
     from_ts = group[0].started_at
@@ -385,7 +387,7 @@ def _bucket_fact(
         "note": ";".join(issues),
         "state": "active",
         "correction_of": None,
-        "config_hash": None,
+        "config_hash": config_hash,
         "experiment_id": None,
         "tags": {"source": source},
     }
@@ -397,6 +399,7 @@ def build_buckets(
     size: int = DEFAULT_BUCKET_SIZE,
     *,
     source: str | None = None,
+    config_hash: str | None = None,
 ) -> list[dict]:
     """회차를 size 크기 버킷으로 묶어 버킷 팩트 목록을 만든다."""
     if size < 1:
@@ -409,7 +412,11 @@ def build_buckets(
     facts: list[dict] = []
     for start in range(0, len(ordered), size):
         group = ordered[start : start + size]
-        facts.append(_bucket_fact(group, size, api_points, timestamps, resolved_source))
+        facts.append(
+            _bucket_fact(
+                group, size, api_points, timestamps, resolved_source, config_hash
+            )
+        )
     return facts
 
 
@@ -505,6 +512,78 @@ def completed_warm_facts(facts: Sequence[dict]) -> list[dict]:
         and f["consumed_chapters"] == f["size"]
         and f.get("cold_count", 0) == 0
     ]
+
+
+def tg_warm_facts(facts: Sequence[dict]) -> list[dict]:
+    """TG만으로 본 완결·웜 버킷(quality/r 무관) — 소비 안전망/기준선용.
+
+    [WHY] 소비 급증 안전망은 TG KB/화만 쓰므로 API settle(quality=ok)을 기다리지
+    않는다. r(보정)만 API settle이 필요하다.
+    """
+    return [
+        f
+        for f in facts
+        if f["consumed_chapters"] == f["size"]
+        and f.get("cold_count", 0) == 0
+        and f["tg_bytes_delta"] > 0
+    ]
+
+
+def compute_config_hash(flags: Mapping[str, object]) -> str:
+    """절감 레버 설정 조합의 식별자(실험 A/B 태깅용)."""
+    payload = ";".join(f"{k}={flags[k]}" for k in sorted(flags))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def record_bucket_facts(
+    log_path: str | Path = DEFAULT_LOG_PATH,
+    state_path: str | Path = DEFAULT_API_STATE_PATH,
+    archive_path: str | Path = DEFAULT_API_POINTS_PATH,
+    out_path: str | Path | None = DEFAULT_OUT_PATH,
+    size: int = DEFAULT_BUCKET_SIZE,
+    config_hash: str | None = None,
+) -> list[dict]:
+    """버킷 팩트를 계산해 append-only `bucket_facts.jsonl`에 영속(멱등).
+
+    반환값(팩트 목록)을 그대로 재사용하면 로그/상태 재파싱을 줄일 수 있다.
+    """
+    chapters = load_chapters(log_path)
+    points = load_api_points(state_path, archive_path)
+    facts = build_buckets(chapters, points, size, config_hash=config_hash)
+    if out_path:
+        append_facts(out_path, facts)
+    return facts
+
+
+def latest_tg_warm_fact(facts: Sequence[dict]) -> dict | None:
+    """최근 완결·웜 버킷(TG 기준) — 없으면 None."""
+    done = tg_warm_facts(facts)
+    return done[-1] if done else None
+
+
+def bucket_ratio_median_from_facts(facts: Sequence[dict], k: int = 5) -> float | None:
+    """완결·웜 + settle(quality ok) 버킷 r의 최근 K개 중앙값 — 없으면 None."""
+    done = completed_warm_facts(facts)
+    ratios = [f["r"] for f in done[-k:] if f.get("r")]
+    return round(median(ratios), 4) if ratios else None
+
+
+def tg_baseline_stats_from_facts(
+    facts: Sequence[dict], size: int = DEFAULT_BUCKET_SIZE
+) -> dict | None:
+    """버킷 팩트(TG)로 회차당 KB 기준선(중앙값)·σ 산출(표본 2개 미만이면 None)."""
+    vals = [
+        f["tg_bytes_delta"] / _KB / f["consumed_chapters"]
+        for f in tg_warm_facts(facts)
+        if f["consumed_chapters"]
+    ]
+    if len(vals) < 2:
+        return None
+    return {
+        "n": len(vals),
+        "kb_per_chapter_median": round(median(vals), 2),
+        "kb_per_chapter_stdev": round(stdev(vals), 3),
+    }
 
 
 def kb_per_chapter(fact: dict) -> float:
