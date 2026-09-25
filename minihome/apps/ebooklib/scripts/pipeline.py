@@ -93,12 +93,21 @@ def _sd_notify(state: str = "") -> None:
 
 
 def _traffic_status(include_buckets: bool = False) -> dict:
-    """status.json용 트래픽 요약 — 이중 캡/단계·리소스 유형·(선택) 버킷 요약."""
+    """status.json용 트래픽 요약 — 이중 캡/단계·리소스 유형·(선택) 버킷/정산.
+
+    watchdog이 이 요약만 읽어 경보한다(읽기 전용 위임; 스키마는 안정적으로 유지).
+    """
     out: dict = {}
     try:
-        from lib.traffic_guard import summary_calibrated
+        from lib.traffic_guard import (
+            is_bucket_anomaly_stop,
+            is_calibration_emergency,
+            summary_calibrated,
+        )
 
         out["summary"] = summary_calibrated()
+        out["bucket_anomaly_stop"] = is_bucket_anomaly_stop()
+        out["calibration_emergency"] = is_calibration_emergency()
     except Exception as e:
         out["summary_error"] = f"{type(e).__name__}: {e}"
     try:
@@ -118,6 +127,15 @@ def _traffic_status(include_buckets: bool = False) -> dict:
                 out["buckets"] = report(facts)
         except Exception as e:
             out["buckets_error"] = f"{type(e).__name__}: {e}"
+        try:
+            api_state = json.loads(
+                (WATCHER_DIR / "dataimpulse_api_state.json").read_text(encoding="utf-8")
+            )
+            reconcile = api_state.get("last_reconcile")
+            if isinstance(reconcile, dict):
+                out["reconcile"] = reconcile
+        except Exception:
+            pass
     return out
 
 
