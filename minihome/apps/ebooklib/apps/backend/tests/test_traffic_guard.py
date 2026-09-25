@@ -916,3 +916,61 @@ class TestDerivativeFilter:
         assert out["source"] == "official:naver"
         assert out["author"] == "비가"
         assert calls["n"] == 1  # 하위 소스는 조회되지만 폐기됨
+
+
+class TestCompletion:
+    def _novel_dir(self, tmp_path, chapters):
+        import json
+        d = tmp_path / "작품"
+        d.mkdir(parents=True, exist_ok=True)
+        for num, content in chapters:
+            (d / f"{1000+num}.json").write_text(
+                json.dumps({"chapter": num, "content": content}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        return d
+
+    def test_tail_completed_markers(self):
+        from lib.completion import tail_completed
+
+        assert tail_completed("... 이야기 끝. <완결> 그동안 감사합니다.") is True
+        assert tail_completed("... 끝. Fin.") is True
+        assert tail_completed("다음 화에서 계속됩니다.") is False
+        assert tail_completed("") is False
+
+    def test_last_chapter_completed(self, tmp_path):
+        from lib.completion import last_chapter_completed
+
+        d = self._novel_dir(tmp_path, [(1, "시작"), (2, "중간"), (3, "끝! <완결>")])
+        assert last_chapter_completed(d) is True
+        d2 = self._novel_dir(tmp_path / "x", [(1, "시작"), (5, "다음 화 기대해주세요")])
+        assert last_chapter_completed(d2) is False
+
+    def test_resolve_completes_only_when_marker_present(self, tmp_path):
+        from lib.completion import resolve_status
+
+        done = self._novel_dir(tmp_path / "done", [(1, "a"), (226, "Fin.")])
+        st, reason = resolve_status(done, munpia_status="완결", naver_status="완결")
+        assert st == "완결" and reason.startswith("verified")
+
+    def test_resolve_holds_ongoing_when_platform_says_done_but_no_marker(self, tmp_path):
+        from lib.completion import resolve_status
+
+        nd = self._novel_dir(tmp_path / "nd", [(1, "a"), (226, "다음 화에서")])
+        st, reason = resolve_status(nd, munpia_status="완결", naver_status="완결")
+        assert st == "연재중" and reason.startswith("unverified")
+
+    def test_resolve_prefers_munpia_and_ignores_when_both_ongoing(self, tmp_path):
+        from lib.completion import resolve_status
+
+        d = self._novel_dir(tmp_path / "d", [(1, "a")])
+        st, _ = resolve_status(d, munpia_status="연재중", naver_status="완결", current="연재중")
+        # 네이버가 완결 주장 → 검수 필요(신호 없음 → 연재중)
+        assert st == "연재중"
+
+    def test_resolve_no_source_keeps_current(self, tmp_path):
+        from lib.completion import resolve_status
+
+        d = self._novel_dir(tmp_path / "z", [(1, "a")])
+        st, reason = resolve_status(d, current="연재중")
+        assert st == "연재중" and reason == "no_source"

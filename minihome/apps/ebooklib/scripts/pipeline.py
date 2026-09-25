@@ -1620,9 +1620,15 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
         # 0순위: 공식 URL이 없으면 **제목으로 공식 플랫폼 검색**(네이버 시리즈 우선)
         official_url = meta.get('meta_source_url') or meta.get('official_url') or ""
         official_meta = None
+        _munpia_status = None
+        _naver_status = None
         if not official_url:
             try:
-                from services.metadata_search import find_official
+                from services.metadata_search import (
+                    find_official,
+                    search_munpia,
+                    search_naver,
+                )
 
                 found = find_official(meta.get('title', novel_dir.name), want_media=meta.get('media_type'))
                 if found and found.get('source_url'):
@@ -1631,6 +1637,17 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
                     log.info(
                         f"  ✓ {novel_dir.name}: 제목 검색으로 공식 URL 확보 ({found.get('source')})"
                     )
+                # 상태 판정용: 문피아(우선)·네이버(보조) 상태를 각각 확보(카카오 제외)
+                try:
+                    _m = search_munpia(meta.get('title', novel_dir.name))
+                    _munpia_status = _m.get('status') if _m else None
+                except Exception:
+                    pass
+                try:
+                    _n = search_naver(meta.get('title', novel_dir.name))
+                    _naver_status = _n.get('status') if _n else None
+                except Exception:
+                    pass
             except Exception as e:
                 log.debug(f"공식 검색 실패({novel_dir.name}): {e}")
 
@@ -1667,6 +1684,21 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
                 f"  ✓ {novel_dir.name}: 공식({official_meta.get('source')}) "
                 f"작가={official_meta.get('author','?')} 총화={official_meta.get('total_chapters')}"
             )
+
+        # 상태: 문피아 우선·네이버 보조, '완결' 주장 시 마지막 회차 직접 검수(카카오 제외)
+        try:
+            from lib.completion import resolve_status
+            from lib.storage import update_meta_status
+
+            status, reason = resolve_status(
+                novel_dir, munpia_status=_munpia_status, naver_status=_naver_status,
+                current=meta.get('status', 'unknown'),
+            )
+            if status != meta.get('status'):
+                update_meta_status(novel_dir.name, status, reason)
+                log.info(f"  ✓ {novel_dir.name}: 상태 {meta.get('status')} → {status} ({reason})")
+        except Exception as e:
+            log.debug(f"상태 판정 실패({novel_dir.name}): {e}")
 
         # 2순위: 공식 URL이 없을 때만 namu.wiki로 보강(추측 아님 — 위키 근거)
         if official_meta is None:

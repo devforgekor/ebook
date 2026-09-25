@@ -247,6 +247,30 @@ def update_meta_from_official(
         return False
 
 
+def update_meta_status(
+    novel_title: str, status: str, reason: str = "", media_type: Optional[str] = None
+) -> bool:
+    """meta.json의 status만 갱신(판정 근거 포함). [WHY] 완결 검수 결과를 기록."""
+    novel_id = novel_title.replace(" ", "_").replace("/", "_")
+    if media_type is not None:
+        novel_dir = novel_dir_for(novel_title, media_type)
+    else:
+        novel_dir = find_novel_dir(novel_id) or novel_dir_for(novel_title)
+    meta_file = novel_dir / "meta.json"
+    if not meta_file.exists():
+        return False
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["status"] = status
+        meta["status_reason"] = reason
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def update_meta_from_namu(
     novel_title: str,
     namu_meta: dict,
