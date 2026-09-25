@@ -264,26 +264,38 @@ def _maybe_calibrate_daily(api_data: dict) -> None:
     if state.get('calibration_last_day') == day:
         return  # 이 수집일은 이미 보정함
 
-    # 해당 수집일의 API 총량 (히스토리에서 조회)
-    api_day_mb = None
-    for entry in (api_data.get('traffic_history') or []):
-        if entry.get('group_date', '').startswith(day):
-            api_day_mb = entry.get('total_traffic', 0) / 1024 / 1024
-            break
-    tg_day_mb = prev.get('bytes', 0) / 1024 / 1024
+    # ① 버킷 중앙값 r (완결·웜) 우선 — 단구간 노이즈에 강함
+    ratio = None
+    ratio_source = None
+    try:
+        from lib.bucket_meter import bucket_ratio_median
 
-    if api_day_mb and tg_day_mb > 0:
-        ratio = api_day_mb / tg_day_mb
+        ratio = bucket_ratio_median()
+        ratio_source = "bucket_median"
+    except Exception as e:
+        logger.debug(f"버킷 r 중앙값 계산 실패(폴백): {e}")
+
+    # ② 폴백: 전일 총량비 (prev_day)
+    if ratio is None:
+        api_day_mb = None
+        for entry in (api_data.get('traffic_history') or []):
+            if entry.get('group_date', '').startswith(day):
+                api_day_mb = entry.get('total_traffic', 0) / 1024 / 1024
+                break
+        tg_day_mb = prev.get('bytes', 0) / 1024 / 1024
+        if api_day_mb and tg_day_mb > 0:
+            ratio = api_day_mb / tg_day_mb
+            ratio_source = "prev_day"
+
+    if ratio is not None:
         _update_calibration_factor_ewma(ratio)
         state['calibration_last_day'] = day
         _save_api_state(state)
-        logger.info(
-            f"보정계수 갱신(수집일 {day}): API={api_day_mb:.1f}MB / TG={tg_day_mb:.1f}MB = {ratio:.3f}"
-        )
+        logger.info(f"보정계수 갱신(수집일 {day}, {ratio_source}): r={ratio:.3f}")
     else:
         logger.info(
             f"보정계수 갱신 대기: 수집일 {day} 데이터 불충분 "
-            f"(api={api_day_mb}, tg_bytes={prev.get('bytes')})"
+            f"(api_history/tg_bytes={prev.get('bytes')})"
         )
 
 
@@ -321,6 +333,21 @@ def check_dataimpulse_sync() -> dict:
         prune_api_snapshots(DEFAULT_API_POINTS_PATH)
     except Exception as e:
         logger.debug(f"원시 스냅샷 기록 실패(무시): {e}")
+
+    # 버킷 소비 급증 안전망 — 완결·웜 버킷 회차당 KB vs 진화 기준선(중복 평가 방지)
+    try:
+        from lib.bucket_meter import kb_per_chapter, latest_completed_warm_bucket
+        from lib.traffic_guard import update_bucket_anomaly
+
+        fact = latest_completed_warm_bucket()
+        if fact is not None:
+            res = update_bucket_anomaly(
+                kb_per_chapter(fact), event_id=fact.get("event_id")
+            )
+            if res.get("stop"):
+                logger.critical("🚨 버킷 소비 급증 5연속 — 파이프라인 중지 플래그 설정됨")
+    except Exception as e:
+        logger.debug(f"버킷 안전망 평가 실패(무시): {e}")
 
     # 보정계수: 전일 총량 기준 1일 1회 갱신 (단구간 노이즈 차단)
     try:

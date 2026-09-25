@@ -1313,10 +1313,13 @@ def _run_collect_locked(limit: int = 0, source_filter: str = "") -> dict:
         state_tag = "콜드" if cs.get("is_cold") else "웜"
         if traffic_delta > 0:
             add_bytes(traffic_delta, chapter=True)
+            _bt = cs.get("traffic_by_type", {})
+            _top = ",".join(f"{k}:{v // 1024}KB" for k, v in list(_bt.items())[:3])
             log.info(
                 f"  📊 트래픽: {traffic_delta / 1024:.1f}KB [{state_tag}] "
                 f"(누적 {summary()['used_mb']:.1f}MB/{summary()['daily_limit_mb']}MB) "
-                f"JS캐시={cs.get('js_cache',0)} hit={cs.get('js_hits',0)} wasm={cs.get('wasm_cache',0)}"
+                f"JS캐시={cs.get('js_cache',0)} hit={cs.get('js_hits',0)} wasm={cs.get('wasm_cache',0)} "
+                f"top={_top}"
             )
         elif traffic_delta == 0 and success:
             log.info(f"  📊 트래픽: 0KB [{state_tag}] (전체 캐시 히트)")
@@ -2501,25 +2504,27 @@ def main():
                 # DataImpulse API 주기 갱신 (일일 한도 SSOT 신선도 유지)
                 _refresh_dataimpulse_periodic()
 
-                # 보정 계수 비상 중지 확인 (20% 이상 급변 5회 연속 시)
+                # 비상 중지 확인 — (a) 보정계수 급변 5연속, (b) 버킷 소비 급증 5연속
                 try:
-                    from lib.traffic_guard import is_calibration_emergency
-                    if is_calibration_emergency():
+                    from lib.traffic_guard import is_calibration_emergency, is_bucket_anomaly_stop
+                    cal_emergency = is_calibration_emergency()
+                    bucket_anomaly = is_bucket_anomaly_stop()
+                    if cal_emergency or bucket_anomaly:
+                        reason = "calibration_spike_5x" if cal_emergency else "bucket_anomaly_5x"
                         log.critical(
-                            "🚨 보정 계수 비상 중지 감지! "
-                            "20% 이상 급변이 5회 연속 발생하여 파이프라인을 중지합니다. "
-                            "사용자 개입 필요: traffic_state.json의 calibration_emergency_stop=false로 설정 후 재시작"
+                            f"🚨 비상 중지 감지({reason})! 웜 기준선 대비 +20% 이상이 5회 연속 — "
+                            "사용자 개입 필요: traffic_state.json 플래그 해제 후 재시작"
                         )
                         # 상태 파일에 비상 중지 기록
                         import json
                         status_data = json.loads(STATUS_FILE.read_text(encoding='utf-8')) if STATUS_FILE.exists() else {}
-                        status_data.update({"phase": "emergency_stop", "emergency_reason": "calibration_spike_5x"})
+                        status_data.update({"phase": "emergency_stop", "emergency_reason": reason})
                         _write_status(status_data)
-                        raise SystemExit("CALIBRATION_EMERGENCY_STOP")
+                        raise SystemExit("EMERGENCY_STOP")
                 except SystemExit:
                     raise
                 except Exception as e:
-                    log.warning(f"보정 계수 비상 중지 확인 실패: {e}")
+                    log.warning(f"비상 중지 확인 실패: {e}")
 
                 # 도메인 헬스체크 (30분 간격, 사이트 주소 변경 시 자동 전환)
                 try:

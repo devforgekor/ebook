@@ -233,3 +233,62 @@ class TestGapSafety:
             }
         )
         assert tg.quota_level() == "critical"
+
+
+class TestBucketAnomaly:
+    def test_should_build_baseline_without_stop(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            assert tg.update_bucket_anomaly(100.0)["stop"] is False
+        assert tg.is_bucket_anomaly_stop() is False
+
+    def test_should_stop_after_consecutive_spikes(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        last = None
+        for _ in range(tg.BUCKET_ANOMALY_CONSECUTIVE):
+            last = tg.update_bucket_anomaly(200.0)  # +100%
+        assert last["stop"] is True
+        assert tg.is_bucket_anomaly_stop() is True
+
+    def test_should_reset_streak_on_normal_value(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        tg.update_bucket_anomaly(200.0)
+        tg.update_bucket_anomaly(200.0)
+        tg.update_bucket_anomaly(100.0)  # 정상 → streak 0
+        assert tg.update_bucket_anomaly(200.0)["streak"] == 1
+        assert tg.is_bucket_anomaly_stop() is False
+
+    def test_clear_should_release_stop(self, state):
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        for _ in range(tg.BUCKET_ANOMALY_CONSECUTIVE):
+            tg.update_bucket_anomaly(150.0)  # +50%
+        assert tg.is_bucket_anomaly_stop() is True
+        tg.clear_bucket_anomaly()
+        assert tg.is_bucket_anomaly_stop() is False
+
+    def test_baseline_should_not_be_inflated_by_anomalies(self, state):
+        # 기준선은 참조 — 급증 샘플은 기준선을 끌어올리지 않아 20%가 중복 누적되지 않는다.
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        tg.update_bucket_anomaly(200.0)
+        tg.update_bucket_anomaly(200.0)
+        assert tg.load_state()["bucket_kb_ewma"] == 100.0
+
+    def test_baseline_should_track_normal_drift(self, state):
+        # 정상 범위 변화는 기준선이 계속 따라간다(고정 기준선 아님).
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        tg.update_bucket_anomaly(110.0)  # +10% (정상) → 기준선 이동
+        assert tg.load_state()["bucket_kb_ewma"] > 100.0
+
+    def test_should_skip_duplicate_event_id(self, state):
+        # 같은 버킷(event_id)은 한 번만 평가 — 5분 주기 호출에서 중복 누적 방지
+        for _ in range(tg.BUCKET_ANOMALY_MIN_SAMPLES):
+            tg.update_bucket_anomaly(100.0)
+        first = tg.update_bucket_anomaly(200.0, event_id="b1")
+        again = tg.update_bucket_anomaly(200.0, event_id="b1")
+        assert first["streak"] == 1
+        assert again.get("skipped") is True
+        assert tg.load_state()["bucket_anomaly_streak"] == 1

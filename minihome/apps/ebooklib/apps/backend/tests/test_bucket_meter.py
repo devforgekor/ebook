@@ -442,3 +442,18 @@ def test_should_record_raw_snapshot_when_pipeline_polls_api(tmp_path, monkeypatc
     assert rows[0]["date"] == today
     assert rows[0]["mb"] == 1.0
     assert rows[0]["event_id"].startswith(f"api:{today}:")
+
+
+def test_completed_warm_facts_should_filter_cold_late_and_partial():
+    from lib.bucket_meter import completed_warm_facts, kb_per_chapter
+
+    facts = [
+        {"quality": "ok", "consumed_chapters": 30, "size": 30, "cold_count": 0, "tg_bytes_delta": 30 * 1024},
+        {"quality": "ok", "consumed_chapters": 30, "size": 30, "cold_count": 1, "tg_bytes_delta": 1},
+        {"quality": "late", "consumed_chapters": 30, "size": 30, "cold_count": 0, "tg_bytes_delta": 1},
+        {"quality": "ok", "consumed_chapters": 10, "size": 30, "cold_count": 0, "tg_bytes_delta": 1},
+    ]
+    out = completed_warm_facts(facts)
+    assert len(out) == 1
+    assert kb_per_chapter(out[0]) == 1.0
+    assert kb_per_chapter({"consumed_chapters": 0, "tg_bytes_delta": 5}) == 0.0

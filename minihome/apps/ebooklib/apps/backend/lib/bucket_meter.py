@@ -457,6 +457,58 @@ def report(facts: Sequence[dict]) -> dict:
     }
 
 
+def completed_warm_facts(facts: Sequence[dict]) -> list[dict]:
+    """완결(size 충족)·웜(콜드 없음)·quality ok 버킷만 골라낸다.
+
+    [WHY] 콜드(첫 로드)와 미완결 버킷은 회차당 소비가 정상 범위를 벗어나므로
+    기준선/안전망 판정에서 제외한다.
+    """
+    return [
+        f
+        for f in facts
+        if f["quality"] == QUALITY_OK
+        and f["consumed_chapters"] == f["size"]
+        and f.get("cold_count", 0) == 0
+    ]
+
+
+def kb_per_chapter(fact: dict) -> float:
+    """버킷 팩트의 회차당 TG KB."""
+    chapters = fact.get("consumed_chapters") or 0
+    return fact["tg_bytes_delta"] / _KB / chapters if chapters else 0.0
+
+
+def latest_completed_warm_bucket(
+    log_path: str | Path = DEFAULT_LOG_PATH,
+    state_path: str | Path = DEFAULT_API_STATE_PATH,
+    archive_path: str | Path = DEFAULT_API_POINTS_PATH,
+    size: int = DEFAULT_BUCKET_SIZE,
+) -> dict | None:
+    """가장 최근의 완결·웜 버킷 팩트 (없으면 None)."""
+    chapters = load_chapters(log_path)
+    points = load_api_points(state_path, archive_path)
+    done = completed_warm_facts(build_buckets(chapters, points, size))
+    return done[-1] if done else None
+
+
+def bucket_ratio_median(
+    log_path: str | Path = DEFAULT_LOG_PATH,
+    state_path: str | Path = DEFAULT_API_STATE_PATH,
+    archive_path: str | Path = DEFAULT_API_POINTS_PATH,
+    size: int = DEFAULT_BUCKET_SIZE,
+    k: int = 5,
+) -> float | None:
+    """최근 K개 완결·웜 버킷의 r 중앙값 (표본 없으면 None).
+
+    [WHY] 단구간 r은 출렁이므로 버킷 누적 중앙값을 보정계수 EWMA 입력으로 쓴다.
+    """
+    chapters = load_chapters(log_path)
+    points = load_api_points(state_path, archive_path)
+    done = completed_warm_facts(build_buckets(chapters, points, size))
+    ratios = [f["r"] for f in done[-k:] if f.get("r")]
+    return round(median(ratios), 4) if ratios else None
+
+
 def append_facts(path: str | Path, facts: Sequence[dict]) -> dict:
     """버킷 팩트를 JSONL에 append — event_id 중복은 건너뛴다(멱등)."""
     target = Path(path)

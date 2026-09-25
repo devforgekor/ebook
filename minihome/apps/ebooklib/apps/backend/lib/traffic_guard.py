@@ -46,6 +46,13 @@ SPC_RULE2_CONSECUTIVE = 5         # Rule 2: Ref 한쪽에 N연속 (편향 감지
 SPC_RULE2_DEADBAND_PCT = 5.0      # Rule 2 데드밴드: ±5% 이내면 무시 (정상 변동)
 SPC_RULE3_WARNING_THRESHOLD = 4   # Rule 3: 경고 누적 임계치 (비상중지)
 
+# 버킷 소비 급증 안전망 — 웜 기준선(회차당 KB) 대비
+# [WHY] 회차별 값은 부정확하지만(콜드/캐시/사이트 변동) 버킷 누적은 안정적이다.
+BUCKET_ANOMALY_DEV_PCT = 20.0     # 기준선 대비 +20% 초과 = 1회 경고
+BUCKET_ANOMALY_CONSECUTIVE = 5    # 5연속 초과 = 파이프라인 중지
+BUCKET_ANOMALY_MIN_SAMPLES = 3    # 기준선 EWMA 최소 표본(판정 시작)
+BUCKET_ANOMALY_ALPHA = 0.2        # 기준선 EWMA 가중치
+
 
 def get_daily_limit_mb() -> int:
     try:
@@ -325,6 +332,101 @@ def clear_calibration_emergency() -> None:
         state['calibration_consecutive_spikes'] = 0
         save_state(state)
         logger.info("보정 계수 비상 중지 플래그 해제됨")
+    finally:
+        _state_unlock(lock)
+
+
+def update_bucket_anomaly(kb_per_chapter: float, event_id: Optional[str] = None) -> dict:
+    """완료된 웜 버킷의 회차당 KB를 기준선(EWMA)과 비교해 소비 급증을 감시.
+
+    [WHY] 회차별 값은 부정확하지만(콜드/캐시/사이트 변동) 버킷 누적은 안정적이다.
+    기준선 대비 +BUCKET_ANOMALY_DEV_PCT% 초과가 BUCKET_ANOMALY_CONSECUTIVE회 연속이면
+    `bucket_anomaly_stop` 플래그를 세워 파이프라인을 중지한다(안전망). 기준선은 정상
+    범위 샘플만 반영해 급증이 기준선을 끌어올리지 않게 한다.
+
+    event_id가 주어지면 같은 버킷을 중복 평가하지 않는다(5분 주기 호출에서 streak
+    중복 누적 방지) — "20%가 중복되면 안 된다".
+    """
+    lock = _state_lock()
+    try:
+        state = load_state()
+        if event_id and state.get('bucket_last_event_id') == event_id:
+            return {"skipped": True, "event_id": event_id}
+
+        baseline = state.get('bucket_kb_ewma')
+        samples = int(state.get('bucket_samples', 0))
+        streak = int(state.get('bucket_anomaly_streak', 0))
+        value = max(0.0, float(kb_per_chapter))
+
+        result = {
+            "value": round(value, 2),
+            "baseline": round(float(baseline), 2) if baseline is not None else None,
+            "dev_pct": None,
+            "streak": streak,
+            "stop": False,
+        }
+
+        if samples < BUCKET_ANOMALY_MIN_SAMPLES:
+            baseline = (
+                value
+                if baseline is None
+                else BUCKET_ANOMALY_ALPHA * value
+                + (1 - BUCKET_ANOMALY_ALPHA) * float(baseline)
+            )
+            samples += 1
+        else:
+            base = float(baseline)
+            dev = ((value / base) - 1) * 100 if base > 0 else 0.0
+            result["baseline"] = round(base, 2)
+            result["dev_pct"] = round(dev, 1)
+            if dev > BUCKET_ANOMALY_DEV_PCT:
+                streak += 1
+                logger.warning(
+                    f"⚠️ 버킷 소비 급증 {streak}/{BUCKET_ANOMALY_CONSECUTIVE}: "
+                    f"{value:.1f}KB/화 (기준선 {base:.1f}, {dev:+.1f}%)"
+                )
+            else:
+                streak = 0
+                baseline = (
+                    BUCKET_ANOMALY_ALPHA * value + (1 - BUCKET_ANOMALY_ALPHA) * base
+                )
+            if streak >= BUCKET_ANOMALY_CONSECUTIVE:
+                state['bucket_anomaly_stop'] = True
+                result["stop"] = True
+                logger.critical(
+                    f"🚨 버킷 소비 급증 {streak}연속 — 파이프라인 중지 플래그 설정"
+                )
+
+        state['bucket_kb_ewma'] = round(float(baseline), 4)
+        state['bucket_samples'] = samples
+        state['bucket_anomaly_streak'] = streak
+        state['bucket_anomaly_updated'] = time.time()
+        if event_id:
+            state['bucket_last_event_id'] = event_id
+        save_state(state)
+        result["streak"] = streak
+        return result
+    finally:
+        _state_unlock(lock)
+
+
+def is_bucket_anomaly_stop() -> bool:
+    """버킷 소비 급증으로 인한 파이프라인 중지 플래그 확인."""
+    try:
+        return bool(load_state().get('bucket_anomaly_stop', False))
+    except Exception:
+        return False
+
+
+def clear_bucket_anomaly() -> None:
+    """버킷 급증 중지 플래그/연속 카운트 해제 (사용자 개입 후 수동 호출)."""
+    lock = _state_lock()
+    try:
+        state = load_state()
+        state['bucket_anomaly_stop'] = False
+        state['bucket_anomaly_streak'] = 0
+        save_state(state)
+        logger.info("버킷 급증 중지 플래그 해제됨")
     finally:
         _state_unlock(lock)
 
