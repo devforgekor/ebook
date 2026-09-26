@@ -610,6 +610,16 @@ class AuthRequest(BaseModel):
     password: str = ""
 
 
+class ResetRequest(BaseModel):
+    """작업 초기화 요청.
+
+    [WHY] 비밀번호를 쿼리스트링으로 받으면 uvicorn access log에 평문으로 남는다.
+    본문(JSON)으로만 받는다 — query 파라미터는 의도적으로 선언하지 않는다.
+    """
+
+    password: str = ""
+
+
 class StartPipelineRequest(BaseModel):
     password: str
     url: str
@@ -785,9 +795,9 @@ async def pipeline_status():
 
 
 @router.post("/pipeline/reset")
-async def pipeline_reset(password: str = ""):
-    """진행 중인 작업 초기화."""
-    if not _secret_matches(password):
+async def pipeline_reset(req: ResetRequest):
+    """진행 중인 작업 초기화. 비밀번호는 JSON 본문으로만 전달한다."""
+    if not _secret_matches(req.password):
         return {"ok": False, "message": "비밀번호 오류"}
     with _JOBS_LOCK:
         _JOBS.clear()

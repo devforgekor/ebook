@@ -407,9 +407,63 @@ class TestAdminAuth:
 
     def test_should_reject_reset_when_password_wrong(self, monkeypatch):
         monkeypatch.setattr(router, "ADMIN_PASSWORD", "s3cret")
-        assert asyncio.run(router.pipeline_reset(password="wrong"))["ok"] is False
+        out = asyncio.run(router.pipeline_reset(router.ResetRequest(password="wrong")))
+        assert out["ok"] is False
 
     def test_should_accept_reset_when_password_matches(self, clean_jobs, monkeypatch):
         monkeypatch.setattr(router, "ADMIN_PASSWORD", "s3cret")
-        assert asyncio.run(router.pipeline_reset(password="s3cret"))["ok"] is True
+        out = asyncio.run(router.pipeline_reset(router.ResetRequest(password="s3cret")))
+        assert out["ok"] is True
+
+    def test_should_reject_reset_when_password_absent(self, monkeypatch):
+        monkeypatch.setattr(router, "ADMIN_PASSWORD", "s3cret")
+        out = asyncio.run(router.pipeline_reset(router.ResetRequest()))
+        assert out["ok"] is False
+
+    def test_should_not_expose_password_as_query_parameter(self):
+        """비밀번호는 query로 받으면 access log에 남는다 — openapi에서 query 선언 금지."""
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(router.router)
+        params = app.openapi()["paths"]["/pipeline/reset"]["post"].get("parameters", [])
+        assert [p["name"] for p in params if p["in"] == "query"] == []
+
+
+class TestAccessLogRedaction:
+    def test_should_mask_password_when_query_used(self, monkeypatch):
+        import logging as _logging
+
+        from lib import database
+
+        monkeypatch.setattr(database, "init_db", lambda: None)
+        import main
+
+        rec = _logging.LogRecord(
+            "uvicorn.access",
+            _logging.INFO,
+            __file__,
+            1,
+            '127.0.0.1:1 - "POST /api/pipeline/reset?password=hunter2 HTTP/1.1" 200 OK',
+            None,
+            None,
+        )
+        assert main._RedactSecretsFilter().filter(rec) is True
+        assert "hunter2" not in rec.getMessage()
+        assert "password=***" in rec.getMessage()
+
+    def test_should_keep_ordinary_access_log_line(self, monkeypatch):
+        import logging as _logging
+
+        from lib import database
+
+        monkeypatch.setattr(database, "init_db", lambda: None)
+        import main
+
+        line = '10.0.0.1:2 - "GET /api/novels HTTP/1.1" 200 OK'
+        rec = _logging.LogRecord(
+            "uvicorn.access", _logging.INFO, __file__, 1, line, None, None
+        )
+        assert main._RedactSecretsFilter().filter(rec) is True
+        assert rec.getMessage() == line
 
