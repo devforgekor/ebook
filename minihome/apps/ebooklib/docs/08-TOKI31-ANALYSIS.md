@@ -180,3 +180,13 @@ resp = session.get("https://toki31.com/ing", timeout=15)
 | `docs/02-BOT-BYPASS.md` | 이전 봇 우회 문서 | **toki31 섹션 구식** |
 | `/etc/tor/torrc.d/toki31.conf` | Tor 설정 (KR/JA exit) | **사실상 무용** |
 | `/opt/ai_data/flaresolverr/rate_limiter.db` | rate limiter | bookto31 전용 |
+
+## 7. 갱신 이력 / 최신 진단 참조
+
+| 일자 | 내용 |
+|---|---|
+| 2026-09-26 | **최신 진단은 [`docs/11-TOKI31-DIAGNOSIS-20260926.md`](11-TOKI31-DIAGNOSIS-20260926.md) 참조.** 도메인 상태·zstd 원인·미검증 항목·개선안 5건은 해당 문서가 기준. |
+
+> [WARNING] 본 문서(08)는 도입기(2026-09-06, curl_cffi + 무료 KR proxy) 기준이라 **구현 현황과 다르다.**
+> 현재 수집기는 `lib/toki31_playwright.py`(Playwright + DataImpulse)이며, §5 권장 접근법·§6 `services/toki31.py`
+> 항목은 더 이상 유효하지 않다. 코드와 어긋나면 **코드가 옳다.**
