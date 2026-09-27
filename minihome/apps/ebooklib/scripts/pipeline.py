@@ -2636,7 +2636,11 @@ def main():
 
     elif cmd == "enrich":
         novel_id = sys.argv[2] if len(sys.argv) > 2 else None
-        run_enrich(novel_id)
+        force = "--force" in sys.argv
+        if novel_id:
+            # Convert title to directory name format (spaces -> underscores)
+            novel_id = novel_id.replace(' ', '_')
+        run_enrich(novel_id, force=force)
 
     elif cmd == "index":
         novel_id = sys.argv[2] if len(sys.argv) > 2 else None

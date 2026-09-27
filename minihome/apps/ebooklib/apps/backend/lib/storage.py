@@ -235,6 +235,8 @@ def update_meta_from_official(
             meta["totalChapters"] = int(official_meta["total_chapters"])
         if official_meta.get("status") and official_meta["status"] != "unknown":
             meta["status"] = official_meta["status"]
+        if official_meta.get("publisher"):
+            meta["publisher"] = official_meta["publisher"]
         meta["official_source"] = official_meta.get("source")
         if official_meta.get("source_url"):
             meta["official_url"] = official_meta["source_url"]
