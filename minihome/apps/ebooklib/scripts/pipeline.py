@@ -1731,6 +1731,22 @@ def run_enrich(novel_id: Optional[str] = None, force: bool = False) -> dict:
                 results['errors'] += 1
                 log.warning(f"  ✗ {novel_dir.name}: 공식 메타 실패 {e}")
 
+        # 폴백: 기존 URL 조회 실패(예: Kakao JS 렌더링 필요) 시 제목 검색으로 재시도
+        # [WHY] 기존 official_url이 카카오 등 fetch 불가 플랫폼이면 publisher가 갱신되지 않음
+        if official_meta is None:
+            try:
+                from services.metadata_search import find_official
+
+                found = find_official(meta.get('title', novel_dir.name), want_media=meta.get('media_type'))
+                if found and found.get('source_url'):
+                    official_meta = found
+                    official_url = found['source_url']
+                    log.info(
+                        f"  ✓ {novel_dir.name}: URL 조회 실패 → 제목 검색 폴백 ({found.get('source')})"
+                    )
+            except Exception as e:
+                log.debug(f"공식 검색 폴백 실패({novel_dir.name}): {e}")
+
         if official_meta is not None:
             from lib.storage import update_meta_from_official
 
