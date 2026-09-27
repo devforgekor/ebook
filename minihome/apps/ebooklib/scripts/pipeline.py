@@ -988,7 +988,7 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
             continue
         item = {
             "wr_id": ch_wr_id,
-            "novel_title": novel_title,
+            "novel_title": title or novel_title,
             "chapter": chapter,
             "source": source,  # ← source 필드
             "bo_table": bo_table,  # ← 게시판(콘텐츠 종류)
