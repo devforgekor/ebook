@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
+from lib.text_clean import clean_title
 from lib.database import get_connection, init_db, DB_PATH
 from lib.paths import (
     normalize_media_type,
@@ -148,7 +149,7 @@ def get_chapter_list(novel_id: str, page: int = 1, limit: int = 20) -> dict:
                 {
                     "wr_id": r["wr_id"],
                     "chapter": r["chapter"],
-                    "title": r["title"],
+                    "title": clean_title(r["title"]),
                     "contentLength": r["content_length"],
                 }
                 for r in rows
@@ -262,6 +263,52 @@ def resolve_status(meta: dict, novel_dir: Path) -> str:
         return "단편"
     if s in ("연재중", "연재"):
         return "연재중"
+
+
+def rebuild_chapters_index(novel_dir: Path) -> list[dict]:
+    """_chapters_index.json 재구축.
+
+    소설 디렉토리의 챕터 JSON 파일들을 읽어서 _chapters_index.json을 재구성.
+    챕터 번호 순으로 정렬, 정제된 제목 반환.
+    """
+    from lib.text_clean import clean_title
+
+    index_file = novel_dir / "_chapters_index.json"
+    chapters = []
+
+    for f in novel_dir.glob("*.json"):
+        if f.name in ("meta.json", "_chapters_index.json") or not f.stem.isdigit():
+            continue
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(f)
+            wr_id = int(f.stem)
+            chapter = d.get("chapter")
+            title = d.get("title") or f"제목 없음"
+            # 제목 정제
+            clean_title_val = clean_title(title)
+            chapters.append({
+                "wr_id": wr_id,
+                "chapter": chapter,
+                "title": clean_title_val,
+                "content_length": d.get("content_length", 0),
+                "collected_at": d.get("collected_at"),
+            })
+        except Exception:
+            continue
+
+    # 챕터 번호 순 정렬 (None은 마지막)
+    chapters.sort(key=lambda x: (x["chapter"] is None, x["chapter"] or 0))
+
+    # _chapters_index.json 저장
+    try:
+        index_file = novel_dir / "_chapters_index.json"
+        with open(index_file, "w", encoding="utf-8") as f:
+            json.dump(chapters, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    return chapters
     latest = ""
     for f in novel_dir.glob("*.json"):
         if f.name in ("meta.json", "_chapters_index.json") or not f.stem.isdigit():
