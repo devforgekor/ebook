@@ -558,15 +558,59 @@ def _parse_bo_table() -> str:
             return sys.argv[i + 1]
     return "novel"
 
-# === 1단계: DISCOVER — wr_id 발견 → 큐에 추가 ===
+# === 완결 판정 관련 상수/유틸 ===
+
+# 완결을 의미하는 키워드들 (최신 챕터 제목에서 감지)
+COMPLETION_KEYWORDS = (
+    "완결", "완결됨", "완", "끝", "핀", "pin", "완료",
+    "完结", "完結", "完", "完本", "结局", "大结局",
+    "final", "finished", "completed", "end", "ending",
+    "完结撒花", "完结撒花~", "完结撒花！",
+    "大结局", "完结篇", "最终话", "最终回",
+)
+
+# 공식 메타 소스 (완결 정보 신뢰도 높음)
+OFFICIAL_SOURCES = ("naver", "munpia", "kakao", "ridibooks", "kakaopage", "series")
+
+def _is_completion_title(title: str) -> bool:
+    """챕터 제목에 완결을 의미하는 키워드가 있는지 확인."""
+    if not title:
+        return False
+    t = title.lower()
+    return any(kw in t for kw in COMPLETION_KEYWORDS)
+
+def _get_latest_chapter(novel_dir: Path) -> Optional[dict]:
+    """소설 디렉토리에서 최신 챕터 정보를 가져옴."""
+    chapters = []
+    for f in novel_dir.glob("*.json"):
+        if f.name in ("meta.json", "_chapters_index.json") or not f.stem.isdigit():
+            continue
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(f)
+            wr_id = int(f.stem)
+            chapter = d.get("chapter")
+            title = d.get("title") or ""
+            if chapter is not None:
+                chapters.append({"wr_id": wr_id, "chapter": chapter, "title": title})
+        except Exception:
+            continue
+    if not chapters:
+        return None
+    # 챕터 번호 순 정렬 (None은 마지막)
+    chapters.sort(key=lambda x: (x["chapter"] is None, x["chapter"] or 0))
+    return chapters[-1]
 
 def _update_novel_status_from_discover(
-    meta: dict, added: int, novel_title: str, *, discovered_ok: bool = True
+    meta: dict, added: int, novel_title: str, novel_dir: Optional[Path] = None, *, discovered_ok: bool = True
 ) -> None:
     """discover 결과로 연재 상태를 갱신 (소스 기반 판단 — namu 의존 없음).
 
-    - 신규 회차 발견(added>0) → 연재중 (활동 증거), no_new_streak 초기화
-    - 신규 0회차 → no_new_streak +1, **임계** 초과 시 완결
+    우선순위:
+    1. 최신 챕터 제목에 완결 키워드(완결, 완결됨, 완, 끝, 핀, pin, 완결됨, 完结, 完結 등)가 있으면 즉시 완결
+    2. 공식 메타(네이버, 문피아, 카카오페이지 등) 소스에서 '완결' 상태면 즉시 완결
+    3. 신규 회차 발견(added>0) → 연재중 (활동 증거), no_new_streak 초기화
+    4. 신규 0회차 → no_new_streak +1, **임계** 초과 시 완결
     - [WHY] discover 자체가 실패/도메인 장애(`discovered_ok=False`)면 판정을 보류한다
       — 일시 장애를 완결로 굳히면 이후 discover 대상에서 영구 제외되기 때문.
     - 완결 판정은 **공식 메타(사용자 URL)가 우선**: `metadata_source == 'official'`이고
@@ -583,10 +627,27 @@ def _update_novel_status_from_discover(
         meta['last_new_episode'] = this_month
         return
 
-    streak = int(meta.get('no_new_streak', 0)) + 1
-    meta['no_new_streak'] = streak
+    # 1순위: 최신 챕터 제목에서 완결 키워드 감지
+    if novel_dir:
+        latest = _get_latest_chapter(novel_dir)
+        if latest and _is_completion_title(latest.get("title", "")):
+            meta['status'] = '완결'
+            log.info(f"  ✓ {novel_title}: 최신 챕터 제목({latest['title']})에 완결 키워드 감지 → 완결 판정")
+            return
+
+    # 2순위: 공식 메타 소스에서 완결 상태 확인 (나중 enrich 단계에서 metadata_source='official' 설정 시 작동)
+    if meta.get('metadata_source') == 'official' and meta.get('status') == '완결':
+        meta['status'] = '완결'
+        log.info(f"  ✓ {novel_title}: 공식 메타에서 완결 상태 확인 → 완결 판정")
+        return
+
+    # 3순위: 공식 메타가 연재중이면 소스 기반 완결 판정 보류
     if meta.get('metadata_source') == 'official' and meta.get('status') == '연재중':
         return  # 공식 페이지가 연재중 → 소스 기반 완결 판정 보류
+
+    # 4순위: 기존 스트릭 기반 완결 판정
+    streak = int(meta.get('no_new_streak', 0)) + 1
+    meta['no_new_streak'] = streak
     if streak >= NO_NEW_STREAK_COMPLETE and meta.get('status') != '완결':
         meta['status'] = '완결'
         log.info(f"  ✓ {novel_title}: {streak}회 연속 신규 회차 0 → 완결로 판정")
@@ -765,7 +826,7 @@ def discover_toki31(novel_id: int, novel_title: str = "", dry_run: bool = False)
         meta['main_wr_id'] = novel_id
         meta['source'] = 'toki31'
         meta['title'] = title or novel_title
-        _update_novel_status_from_discover(meta, added, title or novel_title)
+        _update_novel_status_from_discover(meta, added, title or novel_title, novel_dir=novel_dir)
         with open(meta_file, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -1030,7 +1091,7 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
                 meta['coverUrl'] = cover_url
             # 소스 기반 연재 상태 갱신 (완결 판정 포함)
             _update_novel_status_from_discover(
-                meta, added, novel_title, discovered_ok=fetched_any
+                meta, added, novel_title, novel_dir=novel_dir, discovered_ok=fetched_any
             )
             with open(meta_file, 'w', encoding='utf-8') as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
