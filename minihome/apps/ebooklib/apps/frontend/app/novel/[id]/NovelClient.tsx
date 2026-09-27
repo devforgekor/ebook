@@ -193,7 +193,7 @@ export default function NovelClient({
             >
               <div className="flex justify-between items-center">
                 <span className="text-gray-900 dark:text-white font-medium">
-                  {chapter.title}
+                  {chapter.title} - {chapter.chapter}화
                 </span>
                 <span className="text-sm text-gray-500 dark:text-gray-500">
                   {chapter.contentLength?.toLocaleString()}자
