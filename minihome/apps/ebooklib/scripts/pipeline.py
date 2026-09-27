@@ -18,6 +18,14 @@
 """
 
 import json
+import builtins
+import json as _json_module
+from json import load as _json_load
+
+# [WHY] monkey patch 방지: json.load/open 원본 빌트인 함수 강제 바인딩
+_open = builtins.open
+_json_load = _json_module.load
+
 import os
 import sys
 import time
@@ -586,8 +594,8 @@ def _get_latest_chapter(novel_dir: Path) -> Optional[dict]:
         if f.name in ("meta.json", "_chapters_index.json") or not f.stem.isdigit():
             continue
         try:
-            with open(f, encoding="utf-8") as fh:
-                d = json.load(f)
+            with _open(f, encoding="utf-8") as fh:
+                d = _json_load(fh)
             wr_id = int(f.stem)
             chapter = d.get("chapter")
             title = d.get("title") or ""
