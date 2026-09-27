@@ -46,7 +46,15 @@ def _strip_quotes(text: str) -> str:
     for pair in (("「", "」"), ("『", "』"), ("《", "》"), ("〈", "〉"), ("‘", "’"),
                  ("“", "”"), ("'", "'"), ("'", "'"), ('"', '"'), ("[", "]"), ("(", ")")):
         if len(text) > 2 and text.startswith(pair[0]) and text.endswith(pair[1]):
+            # Check if the brackets are properly balanced (not just first/last char)
+            # by ensuring the opening bracket is not followed by another opening bracket
+            # before the closing one
+            open_char, close_char = pair
             inner = text[1:-1].strip()
+            # Check if there's another opening bracket before the closing one
+            # which would indicate nested/unbalanced brackets
+            if open_char in inner:
+                continue  # Not a simple quoted string, skip this pair
             # 괄호 안이 사이트/각주 표기면 통째로 제거, 아니면 내용 유지
             if inner and not any(s in inner.lower() for s in _SITE_SUFFIXES):
                 return inner
@@ -62,8 +70,8 @@ def clean_title(value: str) -> str:
     # 앞머리 [사이트] / (사이트) 및 꼬리 [독점]·[완결] 등 마케팅 표기 제거
     text = re.sub(r"^\s*[\[(]([^\])]{1,20})[\])]\s*", "", text)
     text = re.sub(r"\s*[\[(](독점|단독|완결|무료|연재중|신작|19금|성인|BL|GL)[\])]\s*$", "", text)
-    # ` - 화수` / ` N화` / ` N편` 등 회차 접미 제거
-    text = re.sub(r"\s*-\s*\d{1,5}\s*(화|편|장|회)\s*$", "", text)
+    # ` - 화수` / ` N화` / ` N편` 등 회차 접미 제거 (dash 없이도 매칭)
+    text = re.sub(r"\s*[-–—]?\s*\d{1,5}\s*(화|편|장|회)\s*$", "", text)
     # ` | 사이트` / ` - 사이트` 접미 제거
     text = re.split(r"\s*[|｜]\s*", text)[0]
     parts = re.split(r"\s+[-–—]\s+", text)

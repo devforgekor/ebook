@@ -1025,7 +1025,7 @@ def run_discover(wr_id: int, novel_title: str = "", max_pages: int = 50, source:
             meta['source'] = source
             meta['bo_table'] = bo_table
             meta['media_type'] = media_type
-            meta['title'] = novel_title
+            meta['title'] = title or novel_title
             if cover_url:
                 meta['coverUrl'] = cover_url
             # 소스 기반 연재 상태 갱신 (완결 판정 포함)
